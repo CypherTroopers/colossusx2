@@ -132,13 +132,17 @@ make mine-easy
 A more research-like benchmark run:
 
 ```bash
-go run . -bench -dag-mib 256 -reads 64 -workers 4 -max-nonces 200000
+go run . -bench -dag-mib 8192 -reads 64 -workers 4 -max-nonces 200000
+go run . -bench -dag-mib 16384 -reads 64 -workers 4 -max-nonces 200000
+go run . -bench -dag-mib 32768 -reads 64 -workers 4 -max-nonces 200000
 ```
 
 Or regular mining:
 
 ```bash
-go run . -dag-mib 256 -reads 64 -workers 4 -max-nonces 200000
+go run . -dag-mib 8192 -reads 64 -workers 4 -max-nonces 200000
+go run . -dag-mib 16384 -reads 64 -workers 4 -max-nonces 200000
+go run . -dag-mib 32768 -reads 64 -workers 4 -max-nonces 200000
 ```
 
 ## Build a binary
@@ -177,7 +181,7 @@ If your Go toolchain is older than the version specified in `go.mod`, the build 
 
 ### DAG size is too large for your machine
 
-`-dag-mib` directly affects memory usage. Start with something small like `1` to `16` before trying larger values.
+`-dag-mib` directly affects memory usage. For larger research runs, prefer `8192` (8 GiB), `16384` (16 GiB), or `32768` (32 GiB).
 
 ### `header`, `epoch-seed`, and `target` must be hex
 
