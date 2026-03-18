@@ -14,7 +14,7 @@ This README was written by inspecting the current codebase so that a new user ca
 ### 1. Clone the repository
 
 ```bash
-git clone <your-repo-url>
+git clone https://github.com/CypherTroopers/colossusx.git
 cd colossusx
 ```
 
