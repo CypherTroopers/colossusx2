@@ -11,7 +11,7 @@
 
 ## Tagline
 
-**Designed for 96–128 GB VRAM Architectures**
+**Designed for Large Unified-Memory GPU Architectures**
 
 ---
 
@@ -19,7 +19,7 @@
 
 COLOSSUS-X is a mining algorithm designed with a **memory-bandwidth-first** philosophy.
 
-Unlike traditional GPU mining algorithms optimized for 8–24 GB VRAM devices, COLOSSUS-X is built for **large-capacity unified-memory GPU architectures**, such as AMD AI Max+ 395 and Nvidia GB10.
+Unlike traditional GPU mining algorithms optimized for 8–24 GB VRAM devices, COLOSSUS-X is designed for **large-capacity unified-memory or shared-memory GPU architectures**, such as AMD AI Max+ 395, Nvidia GB10, and Apple silicon M-series systems.
 
 The algorithm uses a massive **Directed Acyclic Graph (DAG)** that cannot be practically resident on ordinary consumer GPUs. Mining is based on **graph-traversal-driven memory-hard computation**, where sustained random-access bandwidth is the primary bottleneck rather than raw arithmetic throughput.
 
@@ -40,7 +40,7 @@ While the strict production-oriented profile targets an **80 GB DAG**, implement
 - Epoch Length: **8,000 blocks**
 
 **Properties**
-- The full 80 GB DAG is intended to remain resident in VRAM / unified memory.
+- The full 80 GB DAG is intended to remain resident in GPU-visible large unified memory or shared physical memory.
 - Hashing performs random 64-byte reads across the entire DAG.
 - External memory substitution or practical CPU-side solving is intentionally discouraged by the size and bandwidth requirements.
 - The DAG is regenerated every 8,000 blocks.
@@ -73,7 +73,7 @@ While the strict production-oriented profile targets an **80 GB DAG**, implement
 - Reads per Hash: **512**
 - Target Throughput: **50 MH/s**
 - Required Memory Bandwidth: **~3.2 TB/s**
-- Target Memory Types: **HBM3e / LPDDR5X**
+- Target Memory Classes: **HBM-class or large unified high-bandwidth memory systems**
 
 **Properties**
 - Each hash performs 512 random DAG accesses.
@@ -98,18 +98,20 @@ While the strict production-oriented profile targets an **80 GB DAG**, implement
 
 ---
 
-### 4. Zero-Copy Unified Memory Pipeline
+### 4. Unified / Shared Memory Execution Model
 
 **Parameters**
-- PCIe Transfer Overhead: **0 bytes**
-- Copy Operations: **None**
-- CPU Validation: **Shared-pointer DAG**
-- Beneficial Architectures: **AMD/Nvidia UMA only**
+- Preferred Strict Memory Model: **True shared physical memory / large unified memory**
+- Acceptable Research Memory Models: **Managed memory, shared virtual memory, or other compatible transports**
+- CPU Validation: **Shared logical DAG image**
+- Preferred Target Architectures: **AMD AI Max+ 395, Nvidia GB10-class unified-memory systems, Apple silicon M-series**
 
 **Properties**
-- CPU and GPU share the same physical memory pool.
-- PCIe copy overhead is eliminated.
-- The CPU validation path can directly access the same DAG memory region used by the GPU.
+- The strict target architecture assumes a memory model where CPU and GPU can access the DAG without steady-state host/device copy overhead dominating execution.
+- On true unified-memory or shared-physical-memory systems, CPU and GPU may access the same physical memory pool directly.
+- On managed-memory systems, a unified address space may still involve runtime page migration, prefetch, or driver-managed placement.
+- The CPU validation path should be able to access the same logical DAG image used by the GPU, whether that image is physically shared or exposed through a compatible unified-memory abstraction.
+- Research implementations may use alternative memory transports, but these do not redefine the strict COLOSSUS-X target architecture.
 
 ---
 
@@ -117,13 +119,13 @@ While the strict production-oriented profile targets an **80 GB DAG**, implement
 
 **Parameters**
 - Partitions: **16 × 5 GB** in the 80 GB strict profile
-- Ownership: **Per CU / SM cluster**
+- Ownership: **Per CU / SM cluster or equivalent GPU execution cluster**
 - Rebalance Trigger: **Thermal + Power telemetry**
-- Cache Strategy: **L2 locality-aware**
+- Cache Strategy: **Locality-aware scheduling**
 
 **Properties**
 - In the strict profile, the 80 GB DAG is partitioned into sixteen 5 GB regions.
-- Each CU / SM cluster is intended to primarily operate on an assigned region.
+- Each GPU execution cluster is intended to primarily operate on an assigned region.
 - Work can be dynamically rebalanced according to thermal and power telemetry.
 - The scheduler should prefer locality where possible.
 
@@ -136,10 +138,10 @@ While the strict production-oriented profile targets an **80 GB DAG**, implement
 ### 6. ASIC / CPU Resistance Layer
 
 **Parameters**
-- Minimum Required VRAM for strict profile: **88 GB**
-- Typical CPU DDR5 Bandwidth: **~100 GB/s**
+- Minimum Required Unified / GPU-Visible Memory for strict profile: **88 GB recommended system class**
+- Typical CPU DDR5 Bandwidth: **~100 GB/s class**
 - ASIC Practicality: **Low**
-- Typical Discrete GPU Viability: **No** for the strict profile
+- Typical Small Discrete GPU Viability: **No** for the strict profile
 
 **Properties**
 - The 80 GB DAG makes large on-die memory integration economically prohibitive for ASICs.
@@ -158,10 +160,10 @@ While the strict production-oriented profile targets an **80 GB DAG**, implement
 The primary bottleneck is intended to be **memory bandwidth**, not raw arithmetic throughput.
 
 ### Unified Memory Exploitation
-The 80 GB DAG is intended to be **shared with zero-copy semantics** between CPU and GPU on suitable architectures.
+The strict profile is intended to benefit from systems where CPU and GPU can operate on the same logical DAG image with minimal transfer overhead.
 
 ### Egalitarian by Design
-The algorithm intentionally targets only systems with sufficiently large unified-memory pools and bandwidth in strict mode.
+The algorithm intentionally targets only systems with sufficiently large unified-memory or GPU-visible memory pools and bandwidth in strict mode.
 
 ### Long Epoch Stability
 An 8,000-block epoch reduces DAG regeneration overhead and keeps the memory image stable for a long interval.
