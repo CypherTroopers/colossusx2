@@ -90,10 +90,17 @@ func newUnifiedMemoryDAGView(dag *DAG) (unifiedMemoryDAGView, error) {
 	if dag == nil {
 		return unifiedMemoryDAGView{}, ErrNilDAG
 	}
+	return newUnifiedMemoryDAGViewFromBytes(dag.spec, dag.Bytes())
+}
+
+func newUnifiedMemoryDAGViewFromBytes(spec Spec, buf []byte) (unifiedMemoryDAGView, error) {
+	if uint64(len(buf)) < spec.DAGSizeBytes {
+		return unifiedMemoryDAGView{}, errors.New("managed allocation is smaller than the DAG")
+	}
 	return unifiedMemoryDAGView{
-		buf:       dag.Bytes(),
-		nodeSize:  dag.spec.NodeSize,
-		nodeCount: dag.NodeCount(),
+		buf:       buf[:spec.DAGSizeBytes],
+		nodeSize:  spec.NodeSize,
+		nodeCount: spec.NodeCount(),
 	}, nil
 }
 

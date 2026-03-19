@@ -87,3 +87,24 @@ func TestCPUBackendCopiesPreparedDAG(t *testing.T) {
 		t.Fatal("expected prepared CPU backend to keep using its own copied DAG")
 	}
 }
+
+func TestSelectMemoryStrategyFromEnv(t *testing.T) {
+	t.Setenv("COLOSSUSX_UNIFIED_STRATEGY", "cuda-managed")
+	if got := selectMemoryStrategy().Name(); got != "cuda-managed" {
+		t.Fatalf("expected cuda-managed strategy, got %q", got)
+	}
+
+	t.Setenv("COLOSSUSX_UNIFIED_STRATEGY", "opencl-svm")
+	if got := selectMemoryStrategy().Name(); got != "opencl-svm" {
+		t.Fatalf("expected opencl-svm strategy, got %q", got)
+	}
+}
+
+func TestManagedMemoryStubsReturnExplicitErrors(t *testing.T) {
+	if _, err := (CUDAManagedMemory{}).Alloc(64); err == nil {
+		t.Fatal("expected CUDA managed memory stub to fail without cuda+cgo build")
+	}
+	if _, err := (OpenCLSVM{}).Alloc(64); err == nil {
+		t.Fatal("expected OpenCL SVM stub to fail without opencl+cgo build")
+	}
+}

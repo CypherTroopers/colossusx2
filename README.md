@@ -85,6 +85,9 @@ Main flags:
 
 The binary now exposes three backend modes:
 
+The unified backend also honors `COLOSSUSX_UNIFIED_STRATEGY=go-heap|pinned-host|cuda-managed|opencl-svm` so you can force a specific memory transport while keeping the same miner entrypoint. `cuda-managed` and `opencl-svm` require dedicated `cgo` builds.
+
+
 - `-backend unified`: unified memory miner mode, which keeps the DAG in one contiguous shared buffer intended for CPU/GPU shared-memory access
 - `-backend cpu`: CPU miner mode, which prepares a dedicated CPU-side node table for repeated hashing
 - `-backend gpu`: GPU miner mode, available in `-tags opencl` builds with a dedicated OpenCL kernel contract, batched launch configuration, and a CPU-verified execution fallback; the default build still returns a clear error when OpenCL support is not compiled in
@@ -239,3 +242,31 @@ go run . -bench -backend unified -dag-mib 1 -max-nonces 1000 -workers 2
 ```bash
 go run . -dag-mib 1 -workers 2 -max-nonces 10 -target ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
 ```
+
+## Advanced memory backends
+
+### CUDA managed memory
+
+A dedicated `cgo` implementation now exists behind the `cuda` build tag. When built with `-tags cuda` in an environment that has the CUDA runtime available, the unified backend can allocate the DAG with `cudaMallocManaged`, apply basic memory advice/prefetch, and expose the allocation as a Go slice through `unsafe.Slice`.
+
+Example build:
+
+```bash
+go build -tags cuda .
+COLOSSUSX_UNIFIED_STRATEGY=cuda-managed ./colossusx -bench -dag-mib 1
+```
+
+### OpenCL SVM
+
+A dedicated `cgo` implementation now exists behind the `opencl` build tag. When built with `-tags opencl` and linked against OpenCL, the unified backend can allocate the DAG with `clSVMAlloc` and free it with `clSVMFree`. The implementation checks the device SVM capability bits before exposing the allocation to the miner.
+
+Example build:
+
+```bash
+go build -tags opencl .
+COLOSSUSX_UNIFIED_STRATEGY=opencl-svm ./colossusx -bench -dag-mib 1
+```
+
+### GPU backend design
+
+The OpenCL GPU backend is now structured around an explicit `GPUDispatcher` / `GPUExecutionPlan` contract so a real kernel launcher can be dropped in without changing the miner API. The default OpenCL-tagged build still uses a CPU-verified dispatcher, but the backend now carries the kernel name, launch sizes, memory model, and verification policy as first-class runtime data.
