@@ -2,11 +2,14 @@ package main
 
 import (
 	"encoding/binary"
+	"errors"
 	"sync"
 
 	"github.com/zeebo/blake3"
 	"golang.org/x/crypto/sha3"
 )
+
+var ErrNilDAG = errors.New("backend requires a dag")
 
 type hashScratch struct {
 	seedInput  []byte
@@ -75,6 +78,29 @@ type contiguousDAGView struct{ dag *DAG }
 func (v contiguousDAGView) NodeCount() uint64 { return v.dag.NodeCount() }
 func (v contiguousDAGView) ReadNode(i uint64, out *[64]byte) {
 	copy(out[:], v.dag.Node(i))
+}
+
+type unifiedMemoryDAGView struct {
+	buf       []byte
+	nodeSize  uint64
+	nodeCount uint64
+}
+
+func newUnifiedMemoryDAGView(dag *DAG) (unifiedMemoryDAGView, error) {
+	if dag == nil {
+		return unifiedMemoryDAGView{}, ErrNilDAG
+	}
+	return unifiedMemoryDAGView{
+		buf:       dag.Bytes(),
+		nodeSize:  dag.spec.NodeSize,
+		nodeCount: dag.NodeCount(),
+	}, nil
+}
+
+func (v unifiedMemoryDAGView) NodeCount() uint64 { return v.nodeCount }
+func (v unifiedMemoryDAGView) ReadNode(i uint64, out *[64]byte) {
+	off := i * v.nodeSize
+	copy(out[:], v.buf[off:off+v.nodeSize])
 }
 
 type pooledScratch struct{ pool sync.Pool }
