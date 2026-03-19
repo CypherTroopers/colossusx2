@@ -1,4 +1,4 @@
-`colossusx` is a minimal COLOSSUS-X research miner written in Go. It runs as a single binary, generates its DAG at startup, and then executes either a benchmark or a mining loop.
+`colossusx` is a minimal COLOSSUS-X research miner written in Go. It runs as a single binary, generates its DAG at startup, and then executes either a benchmark or a mining loop across selectable `unified`, `cpu`, and `gpu` backends.
 
 This README was written by inspecting the current codebase so that a new user can go from a fresh environment to a verified local run.
 
@@ -54,6 +54,7 @@ The easiest way to verify the project is with the provided Make targets:
 ```bash
 make help
 make bench-small
+make bench-cpu
 make mine-easy
 ```
 
@@ -68,6 +69,7 @@ go run . -h
 Main flags:
 
 - `-bench`: run the hash-loop benchmark only
+- `-backend`: select `unified`, `cpu`, or `gpu` mining backend
 - `-dag-mib`: DAG size in MiB
 - `-reads`: random DAG reads per hash
 - `-workers`: worker count
@@ -78,12 +80,23 @@ Main flags:
 - `-start-nonce`: starting nonce
 - `-max-nonces`: nonce attempts to try; `0` means unbounded
 
+
+### Mining backends
+
+The binary now exposes three backend modes:
+
+- `-backend unified`: the original unified-memory-oriented contiguous DAG layout and CPU hash path
+- `-backend cpu`: explicit CPU mining mode using the same DAG and hash function
+- `-backend gpu`: available in `-tags opencl` builds as an experimental GPU-ready mode; the default build returns a clear error, and the OpenCL build currently reuses the CPU hash path until a dedicated kernel is wired in
+
+For most users today, `unified` and `cpu` are the working modes in this repository.
+
 ## Fastest verified local run
 
 The quickest way to confirm the program works is to run a small benchmark with a 1 MiB DAG:
 
 ```bash
-go run . -bench -dag-mib 1 -max-nonces 1000 -workers 2
+go run . -bench -backend unified -dag-mib 1 -max-nonces 1000 -workers 2
 ```
 
 Expected flow:
@@ -218,7 +231,7 @@ go run . -h
 ### Run the benchmark smoke test
 
 ```bash
-go run . -bench -dag-mib 1 -max-nonces 1000 -workers 2
+go run . -bench -backend unified -dag-mib 1 -max-nonces 1000 -workers 2
 ```
 
 ### Run the easy-target mining smoke test
