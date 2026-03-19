@@ -8,13 +8,14 @@ func (v cpuDAGView) NodeCount() uint64                { return uint64(len(v.node
 func (v cpuDAGView) ReadNode(i uint64, out *[64]byte) { *out = [64]byte(v.nodes[i]) }
 
 type CPUBackend struct {
+	spec    Spec
 	nodes   []cpuNode
 	scratch *pooledScratch
 }
 
 func (b *CPUBackend) Mode() BackendMode { return BackendCPU }
 func (b *CPUBackend) Description() string {
-	return "cpu miner with a dedicated prepared node table and pooled worker scratch"
+	return "cpu backend with a prepared node table and shared core algorithm"
 }
 func (b *CPUBackend) Prepare(dag *DAG) error {
 	if dag == nil {
@@ -23,6 +24,7 @@ func (b *CPUBackend) Prepare(dag *DAG) error {
 	if b.scratch == nil {
 		b.scratch = newPooledScratch()
 	}
+	b.spec = dag.Spec()
 	count := dag.NodeCount()
 	b.nodes = make([]cpuNode, count)
 	for i := uint64(0); i < count; i++ {
@@ -36,7 +38,7 @@ func (b *CPUBackend) Hash(header []byte, nonce uint64, dag *DAG) HashResult {
 	}
 	s := b.scratch.acquire(len(header))
 	defer b.scratch.release(s)
-	return latticeHashWithAccessor(header, nonce, cpuDAGView{nodes: b.nodes}, s)
+	return latticeHashWithAccessor(b.spec, header, nonce, cpuDAGView{nodes: b.nodes}, s)
 }
 
 func (b *CPUBackend) HashBatch(header []byte, startNonce uint64, count uint64, dag *DAG) ([]HashResult, error) {

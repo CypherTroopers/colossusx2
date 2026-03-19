@@ -1,273 +1,100 @@
-`colossusx` is a minimal COLOSSUS-X miner written in Go. The repository now exposes a dedicated `colossusx/` core package for the spec-locked algorithm while keeping the CLI and research backends usable. It generates its DAG at startup, and then executes either a benchmark or a mining loop across selectable `unified memory`, `cpu`, and `gpu` miner backends.
+# COLOSSUS-X
 
-This README was written by inspecting the current codebase so that a new user can go from a fresh environment to a verified local run.
+This repository now separates a spec-locked `colossusx` core package from the CLI and execution backends.
 
-## Prerequisites
+## Architecture
 
-- OS: macOS, Linux, or WSL (any environment that can run Go)
-- Go: **1.23 or newer**
-  - `go.mod` specifies `go 1.23.0`
-- Network access for the first dependency download
+- `main.go` is orchestration only: CLI parsing, config wiring, DAG allocation selection, miner startup, and result printing.
+- `colossusx/` owns the COLOSSUS-X semantics: strict constants, DAG generation, lattice hashing, mining flow, and deterministic big-endian target comparison.
+- `unified` and `cpu` backends are execution strategies over the same core algorithm.
+- `gpu` remains explicitly disabled unless a future implementation is proven hash-equivalent; this repository does **not** claim working GPU acceleration today.
 
-## Setup
+## Strict COLOSSUS-X spec
 
-### 1. Clone the repository
+Strict mode centralizes and enforces these constants inside `colossusx/spec.go`:
 
-```bash
-git clone https://github.com/CypherTroopers/colossusx.git
-cd colossusx
-```
+- `DAG_SIZE = 80 * 1024^3`
+- `NODE_SIZE = 64`
+- `READS_PER_H = 512`
+- `EPOCH_BLOCKS = 8000`
 
-> If you already have the repository checked out locally, you can skip this step.
+Strict mode rejects CLI attempts to override DAG size, reads per hash, or epoch blocks.
 
-### 2. Verify your Go version
+## Research / development compatibility
 
-```bash
-go version
-```
+A compatibility path still exists for development and testing:
 
-You should see `go1.23.x` or newer.
+- use `-mode research`
+- use smaller DAGs or alternate read counts for local tests
+- keep the exact same core algorithm implementation
+- rely on Go heap allocation as the fallback memory model when unified-memory-capable transports are unavailable
 
-### 3. Download dependencies
+This compatibility mode does **not** change the strict path or silently weaken strict-mode validation.
 
-In most cases, `go run` and `go build` will download modules automatically. If you want to do it explicitly:
+## Algorithm summary
 
-```bash
-go mod download
-```
+### 1. DAG generation
 
-## Project layout
+For each node index `i`:
 
-This repository is intentionally small. The main files are:
+- allocate a unified-memory-compatible DAG buffer abstraction
+- compute `dag[i] = keccak512(epoch_seed ++ i)`
 
-- `main.go`: CLI entrypoint, backend selection, benchmark loop, and mining loop
-- `colossusx/`: spec-locked COLOSSUS-X core package with constants, DAG generation, target comparison, and LatticeHash
-- `go.mod`: module definition and Go version
-- `go.sum`: dependency checksums
-- `Makefile`: convenience targets for the most common local workflows
+### 2. Lattice hash
 
-## Quick start
+- `seed = sha3_512(header ++ nonce)`
+- `mix = first 32 bytes of seed`
+- repeat `READS_PER_H` rounds:
+  - `node_idx = fnv1a(mix ++ round_index) % NODE_COUNT`
+  - `node_data = dag[node_idx]`
+  - `mix = blake3(mix XOR node_data)`
+- `result = sha3_512(seed ++ mix)`
 
-### Option A: use the Makefile
+### 3. Mining loop
 
-The easiest way to verify the project is with the provided Make targets:
+- each backend calls the same core lattice hash implementation
+- target comparison is deterministic and big-endian
 
-```bash
-make help
-make bench-small
-make bench-cpu
-make mine-easy
-```
+## CLI modes
 
-### Option B: run commands directly
+### Strict mode
 
-#### Show CLI help
+Default mode:
 
 ```bash
-go run . -h
+go run . -mode strict -bench -backend unified
 ```
 
-Main flags:
+Because strict mode uses the real 80 GiB DAG constant, it is mainly intended for production-grade orchestration and spec verification.
 
-- `-bench`: run the hash-loop benchmark only
-- `-backend`: select `unified`, `cpu`, or `gpu` miner backend
-- `-dag-mib`: DAG size in MiB
-- `-reads`: random DAG reads per hash
-- `-workers`: worker count
-- `-epoch-blocks`: blocks per epoch
-- `-epoch-seed`: hex seed used for DAG generation
-- `-header`: input header as hex
-- `-target`: 32-byte big-endian target
-- `-start-nonce`: starting nonce
-- `-max-nonces`: nonce attempts to try; `0` means unbounded
+### Research mode
 
-
-### Mining backends
-
-The binary now exposes three backend modes:
-
-The unified backend also honors `COLOSSUSX_UNIFIED_STRATEGY=go-heap|pinned-host|cuda-managed|opencl-svm` so you can force a specific memory transport while keeping the same miner entrypoint. `cuda-managed` and `opencl-svm` require dedicated `cgo` builds.
-
-
-- `-backend unified`: unified memory miner mode, which keeps the DAG in one contiguous shared buffer intended for CPU/GPU shared-memory access
-- `-backend cpu`: CPU miner mode, which prepares a dedicated CPU-side node table for repeated hashing
-- `-backend gpu`: GPU miner mode, available in `-tags opencl` builds with a dedicated OpenCL kernel contract, batched launch configuration, and a CPU-verified execution fallback; the default build still returns a clear error when OpenCL support is not compiled in
-
-`unified` is the unified memory miner: it keeps the DAG in a contiguous shared buffer so CPU-side hashing works against the same memory layout intended for GPU sharing. `cpu` is the dedicated CPU miner and copies the DAG into its own prepared node table. `gpu` is the dedicated GPU miner and exposes the OpenCL kernel path in OpenCL-enabled builds.
-
-## Fastest verified local run
-
-The quickest way to confirm the program works is to run a small benchmark with a 1 MiB DAG:
+For development and tests:
 
 ```bash
-go run . -bench -backend unified -dag-mib 1 -max-nonces 1000 -workers 2
+go run . -mode research -bench -backend unified -dag-mib 1 -reads 8 -max-nonces 1000
 ```
 
-Expected flow:
+## Backends
 
-1. The miner configuration is printed.
-2. The DAG is generated.
-3. `benchmark complete` is printed.
-4. `hashes`, `elapsed`, and `hashrate` are shown.
+- `unified`: primary long-term memory model; operates directly over the shared DAG allocation.
+- `cpu`: prepares its own CPU-side node table but still calls the same `colossusx.LatticeHash` logic.
+- `gpu`: intentionally unavailable in default builds and still described as disabled until hash parity is proven.
 
-The equivalent Make target is:
+## Testing
+
+Run:
 
 ```bash
-make bench-small
+go test ./... -count=1
 ```
 
-## Verified mining run
+The test suite covers:
 
-With the default target, you may not find a solution quickly. For a simple execution check, use an intentionally easy target:
-
-```bash
-go run . \
-  -dag-mib 1 \
-  -workers 2 \
-  -max-nonces 10 \
-  -target ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
-```
-
-This makes it easy to confirm output such as:
-
-- `solution found`
-- `nonce`
-- `hash256`
-- `hash512`
-- `elapsed`
-- `hashes`
-- `hashrate`
-
-The equivalent Make target is:
-
-```bash
-make mine-easy
-```
-
-## More realistic examples
-
-A more research-like benchmark run:
-
-```bash
-go run . -bench -dag-mib 8192 -reads 64 -workers 4 -max-nonces 200000
-go run . -bench -dag-mib 16384 -reads 64 -workers 4 -max-nonces 200000
-go run . -bench -dag-mib 32768 -reads 64 -workers 4 -max-nonces 200000
-```
-
-Or regular mining:
-
-```bash
-go run . -dag-mib 8192 -reads 64 -workers 4 -max-nonces 200000
-go run . -dag-mib 16384 -reads 64 -workers 4 -max-nonces 200000
-go run . -dag-mib 32768 -reads 64 -workers 4 -max-nonces 200000
-```
-
-## Build a binary
-
-If you prefer a compiled binary over `go run`:
-
-```bash
-go build -o bin/colossusx .
-./bin/colossusx -bench -dag-mib 1 -max-nonces 1000 -workers 2
-```
-
-Or use the Make target:
-
-```bash
-make build
-./bin/colossusx -bench -dag-mib 1 -max-nonces 1000 -workers 2
-```
-
-## Code flow overview
-
-At a high level, the program does the following:
-
-1. Parse CLI flags.
-2. Build a `Spec` and validate it.
-3. Decode `header`, `epoch-seed`, and `target` from hex.
-4. Allocate the DAG buffer.
-5. Generate the DAG with `GenerateDAG`.
-6. Run `Benchmark` if `-bench` is enabled.
-7. Otherwise run `Mine` and search for a valid hash.
-
-## Common pitfalls
-
-### Go version is too old
-
-If your Go toolchain is older than the version specified in `go.mod`, the build may fail.
-
-### DAG size is too large for your machine
-
-`-dag-mib` directly affects memory usage. For larger research runs, prefer `8192` (8 GiB), `16384` (16 GiB), or `32768` (32 GiB).
-
-### `header`, `epoch-seed`, and `target` must be hex
-
-Invalid hex input will cause startup errors. In particular, `-target` must be exactly **32 bytes / 64 hex characters**.
-
-### A default mining run may not find a solution
-
-In mining mode, the program exits with `no solution found in range` if no solution exists within the specified nonce range. For a simple smoke test, use the easy target shown above.
-
-## Make targets
-
-```bash
-make help
-```
-
-Available targets:
-
-- `make help`: list available targets
-- `make deps`: download Go module dependencies
-- `make build`: build `bin/colossusx`
-- `make run-help`: print the CLI help
-- `make bench-small`: run the verified small benchmark
-- `make mine-easy`: run the verified easy-target mining example
-- `make clean`: remove build artifacts
-
-## Minimum verification checklist
-
-### Show help
-
-```bash
-go run . -h
-```
-
-### Run the benchmark smoke test
-
-```bash
-go run . -bench -backend unified -dag-mib 1 -max-nonces 1000 -workers 2
-```
-
-### Run the easy-target mining smoke test
-
-```bash
-go run . -dag-mib 1 -workers 2 -max-nonces 10 -target ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
-```
-
-## Advanced memory backends
-
-### CUDA managed memory
-
-A dedicated `cgo` implementation now exists behind the `cuda` build tag. When built with `-tags cuda` in an environment that has the CUDA runtime available, the unified backend can allocate the DAG with `cudaMallocManaged`, apply basic memory advice/prefetch, and expose the allocation as a Go slice through `unsafe.Slice`.
-
-Example build:
-
-```bash
-go build -tags cuda .
-COLOSSUSX_UNIFIED_STRATEGY=cuda-managed ./colossusx -bench -dag-mib 1
-```
-
-### OpenCL SVM
-
-A dedicated `cgo` implementation now exists behind the `opencl` build tag. When built with `-tags opencl` and linked against OpenCL, the unified backend can allocate the DAG with `clSVMAlloc` and free it with `clSVMFree`. The implementation checks the device SVM capability bits before exposing the allocation to the miner.
-
-Example build:
-
-```bash
-go build -tags opencl .
-COLOSSUSX_UNIFIED_STRATEGY=opencl-svm ./colossusx -bench -dag-mib 1
-```
-
-### GPU backend design
-
-The OpenCL GPU backend is now structured around an explicit `GPUDispatcher` / `GPUExecutionPlan` contract so a real kernel launcher can be dropped in without changing the miner API. The default OpenCL-tagged build still uses a CPU-verified dispatcher, but the backend now carries the kernel name, launch sizes, memory model, and verification policy as first-class runtime data.
+- DAG determinism for identical seeds
+- DAG divergence for different seeds
+- lattice hash determinism
+- strict-mode constant enforcement
+- target comparison correctness
+- backend parity between unified and cpu
+- practical CLI parsing / mode regression checks

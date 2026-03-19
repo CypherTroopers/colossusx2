@@ -1,6 +1,10 @@
 package main
 
-import "testing"
+import (
+	"testing"
+
+	cx "colossusx/colossusx"
+)
 
 func TestParseBackendMode(t *testing.T) {
 	for _, mode := range []string{"unified", "cpu", "gpu"} {
@@ -13,8 +17,25 @@ func TestParseBackendMode(t *testing.T) {
 	}
 }
 
+func TestParseCLIConfigStrictModeRejectsOverrides(t *testing.T) {
+	_, err := parseCLIConfig([]string{"-mode", "strict", "-dag-mib", "1"})
+	if err == nil {
+		t.Fatal("expected strict mode override to fail")
+	}
+}
+
+func TestParseCLIConfigResearchModeAllowsOverrides(t *testing.T) {
+	cfg, err := parseCLIConfig([]string{"-mode", "research", "-dag-mib", "1", "-reads", "8", "-epoch-blocks", "16"})
+	if err != nil {
+		t.Fatalf("parseCLIConfig: %v", err)
+	}
+	if cfg.spec.Mode != cx.ModeResearch || cfg.spec.DAGSizeBytes != 1024*1024 || cfg.spec.ReadsPerHash != 8 || cfg.spec.EpochBlocks != 16 {
+		t.Fatalf("unexpected research spec: %+v", cfg.spec)
+	}
+}
+
 func TestCPUAndUnifiedBackendsProduceSameHash(t *testing.T) {
-	spec := Spec{DAGSizeBytes: 1024 * 1024, NodeSize: DefaultNodeSize, ReadsPerHash: 8, EpochBlocks: DefaultEpochBlocks}
+	spec := Spec{Mode: cx.ModeResearch, DAGSizeBytes: 1024 * 1024, NodeSize: DefaultNodeSize, ReadsPerHash: 8, EpochBlocks: DefaultEpochBlocks}
 	dag, err := NewDAG(spec)
 	if err != nil {
 		t.Fatalf("NewDAG: %v", err)
@@ -44,7 +65,7 @@ func TestCPUAndUnifiedBackendsProduceSameHash(t *testing.T) {
 }
 
 func TestUnifiedBackendUsesDAGAllocationDirectly(t *testing.T) {
-	spec := Spec{DAGSizeBytes: 64 * 8, NodeSize: DefaultNodeSize, ReadsPerHash: 4, EpochBlocks: DefaultEpochBlocks}
+	spec := Spec{Mode: cx.ModeResearch, DAGSizeBytes: 64 * 8, NodeSize: DefaultNodeSize, ReadsPerHash: 4, EpochBlocks: DefaultEpochBlocks}
 	dag, err := NewDAG(spec)
 	if err != nil {
 		t.Fatalf("NewDAG: %v", err)
@@ -59,7 +80,7 @@ func TestUnifiedBackendUsesDAGAllocationDirectly(t *testing.T) {
 	}
 	original := backend.Hash([]byte("header"), 1, dag)
 
-	copy(dag.Node(0), make([]byte, 64))
+	copy(dag.Bytes(), make([]byte, len(dag.Bytes())))
 	mutated := backend.Hash([]byte("header"), 1, dag)
 	if original == mutated {
 		t.Fatal("expected unified backend to observe DAG mutations through shared memory")
@@ -67,7 +88,7 @@ func TestUnifiedBackendUsesDAGAllocationDirectly(t *testing.T) {
 }
 
 func TestCPUBackendCopiesPreparedDAG(t *testing.T) {
-	spec := Spec{DAGSizeBytes: 64 * 8, NodeSize: DefaultNodeSize, ReadsPerHash: 4, EpochBlocks: DefaultEpochBlocks}
+	spec := Spec{Mode: cx.ModeResearch, DAGSizeBytes: 64 * 8, NodeSize: DefaultNodeSize, ReadsPerHash: 4, EpochBlocks: DefaultEpochBlocks}
 	dag, err := NewDAG(spec)
 	if err != nil {
 		t.Fatalf("NewDAG: %v", err)
@@ -82,7 +103,7 @@ func TestCPUBackendCopiesPreparedDAG(t *testing.T) {
 	}
 	original := backend.Hash([]byte("header"), 1, dag)
 
-	copy(dag.Node(0), make([]byte, 64))
+	copy(dag.Bytes(), make([]byte, len(dag.Bytes())))
 	mutated := backend.Hash([]byte("header"), 1, dag)
 	if original != mutated {
 		t.Fatal("expected prepared CPU backend to keep using its own copied DAG")

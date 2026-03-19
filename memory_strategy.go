@@ -3,17 +3,14 @@ package main
 import (
 	"fmt"
 	"strings"
+
+	cx "colossusx/colossusx"
 )
 
-type managedAllocation interface {
-	Bytes() []byte
-	Free() error
-	Name() string
-}
+type managedAllocation = cx.Allocation
 
 type MemoryStrategy interface {
-	Alloc(size uint64) (managedAllocation, error)
-	Name() string
+	cx.Allocator
 }
 
 type sliceAllocation struct {
@@ -33,14 +30,14 @@ func (a *sliceAllocation) Free() error {
 
 type GoHeapMemory struct{}
 
-func (GoHeapMemory) Alloc(size uint64) (managedAllocation, error) {
+func (GoHeapMemory) Alloc(size uint64) (cx.Allocation, error) {
 	return &sliceAllocation{name: "go-heap", buf: make([]byte, size)}, nil
 }
 func (GoHeapMemory) Name() string { return "go-heap" }
 
 type PinnedMemory struct{}
 
-func (PinnedMemory) Alloc(size uint64) (managedAllocation, error) {
+func (PinnedMemory) Alloc(size uint64) (cx.Allocation, error) {
 	_ = size
 	return nil, ErrNotImplemented("pinned memory requires platform-specific implementation")
 }
@@ -48,7 +45,7 @@ func (PinnedMemory) Name() string { return "pinned-host" }
 
 type CUDAManagedMemory struct{}
 
-func (m CUDAManagedMemory) Alloc(size uint64) (managedAllocation, error) {
+func (m CUDAManagedMemory) Alloc(size uint64) (cx.Allocation, error) {
 	return allocCUDAManaged(size)
 }
 func (CUDAManagedMemory) Name() string { return "cuda-managed" }
@@ -57,7 +54,7 @@ type OpenCLSVM struct {
 	Context OpenCLContext
 }
 
-func (m OpenCLSVM) Alloc(size uint64) (managedAllocation, error) {
+func (m OpenCLSVM) Alloc(size uint64) (cx.Allocation, error) {
 	return allocOpenCLSVM(m.Context, size)
 }
 func (OpenCLSVM) Name() string { return "opencl-svm" }
@@ -74,11 +71,7 @@ func selectDAGStrategy(backend BackendMode, dagAlloc string) (MemoryStrategy, er
 	}
 	if choice == "auto" {
 		switch backend {
-		case BackendCPU:
-			return GoHeapMemory{}, nil
-		case BackendUnified:
-			return GoHeapMemory{}, nil
-		case BackendGPU:
+		case BackendCPU, BackendUnified, BackendGPU:
 			return GoHeapMemory{}, nil
 		default:
 			return nil, fmt.Errorf("unsupported backend %q", backend)

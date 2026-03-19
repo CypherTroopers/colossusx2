@@ -3,6 +3,7 @@ package main
 import "fmt"
 
 type UnifiedBackend struct {
+	spec         Spec
 	shared       unifiedMemoryDAGView
 	scratch      *pooledScratch
 	strategyName string
@@ -15,20 +16,21 @@ func (b *UnifiedBackend) Description() string {
 	if name == "" {
 		name = "go-heap"
 	}
-	return fmt.Sprintf("managed unified memory backend (dag-allocation=%s)", name)
+	return fmt.Sprintf("unified-memory-compatible backend (dag-allocation=%s)", name)
 }
 
 func (b *UnifiedBackend) Prepare(dag *DAG) error {
 	if dag == nil {
 		return ErrNilDAG
 	}
-	shared, err := newUnifiedMemoryDAGViewFromBytes(dag.spec, dag.Bytes())
+	shared, err := newUnifiedMemoryDAGViewFromBytes(dag.Spec(), dag.Bytes())
 	if err != nil {
 		return err
 	}
+	b.spec = dag.Spec()
 	b.shared = shared
-	if dag.alloc != nil {
-		b.strategyName = dag.alloc.Name()
+	if named := dag.AllocationName(); named != "" {
+		b.strategyName = named
 	}
 	if b.scratch == nil {
 		b.scratch = newPooledScratch()
@@ -44,7 +46,7 @@ func (b *UnifiedBackend) Hash(header []byte, nonce uint64, dag *DAG) HashResult 
 	}
 	s := b.scratch.acquire(len(header))
 	defer b.scratch.release(s)
-	return latticeHashWithAccessor(header, nonce, b.shared, s)
+	return latticeHashWithAccessor(b.spec, header, nonce, b.shared, s)
 }
 
 func (b *UnifiedBackend) HashBatch(header []byte, startNonce uint64, count uint64, dag *DAG) ([]HashResult, error) {

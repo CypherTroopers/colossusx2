@@ -11,38 +11,22 @@ var ErrNilDAG = errors.New("backend requires a dag")
 
 type hashScratch = cx.HashScratch
 
-type dagAccessor interface {
-	NodeCount() uint64
-	ReadNode(uint64, *[64]byte)
-}
+func newHashScratch(headerLen int) *hashScratch     { return cx.NewHashScratch(headerLen) }
+func ensureSeedInput(s *hashScratch, headerLen int) { cx.EnsureSeedInput(s, headerLen) }
 
-func newHashScratch(headerLen int) *hashScratch { return cx.NewHashScratch(headerLen) }
-func ensureSeedInput(s *hashScratch, headerLen int) {
-	cx.EnsureSeedInput(s, headerLen)
-}
-
-func latticeHashWithAccessor(header []byte, nonce uint64, accessor dagAccessor, scratch *hashScratch) HashResult {
-	return cx.LatticeHash(header, nonce, accessor, scratch)
+func latticeHashWithAccessor(spec Spec, header []byte, nonce uint64, accessor cx.DAGAccessor, scratch *hashScratch) HashResult {
+	return cx.LatticeHash(spec, header, nonce, accessor, scratch)
 }
 
 type contiguousDAGView struct{ dag *DAG }
 
-func (v contiguousDAGView) NodeCount() uint64 { return v.dag.NodeCount() }
-func (v contiguousDAGView) ReadNode(i uint64, out *[64]byte) {
-	copy(out[:], v.dag.Node(i))
-}
+func (v contiguousDAGView) NodeCount() uint64                { return v.dag.NodeCount() }
+func (v contiguousDAGView) ReadNode(i uint64, out *[64]byte) { v.dag.ReadNode(i, out) }
 
 type unifiedMemoryDAGView struct {
 	buf       []byte
 	nodeSize  uint64
 	nodeCount uint64
-}
-
-func newUnifiedMemoryDAGView(dag *DAG) (unifiedMemoryDAGView, error) {
-	if dag == nil {
-		return unifiedMemoryDAGView{}, ErrNilDAG
-	}
-	return newUnifiedMemoryDAGViewFromBytes(dag.spec, dag.Bytes())
 }
 
 func newUnifiedMemoryDAGViewFromBytes(spec Spec, buf []byte) (unifiedMemoryDAGView, error) {

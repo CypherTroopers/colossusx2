@@ -17,7 +17,7 @@ func (a sliceAccessor) ReadNode(i uint64, out *[64]byte) {
 }
 
 func testSpec() Spec {
-	return Spec{DAGSizeBytes: 64 * 16, NodeSize: NodeSize, ReadsPerHash: ReadsPerHash, EpochBlocks: EpochBlocks}
+	return ResearchSpec(64*16, 8, StrictEpochBlocks)
 }
 
 func TestGenerateDAGDeterministic(t *testing.T) {
@@ -37,6 +37,21 @@ func TestGenerateDAGDeterministic(t *testing.T) {
 	}
 }
 
+func TestGenerateDAGDiffersAcrossSeeds(t *testing.T) {
+	spec := testSpec()
+	left := make([]byte, spec.DAGSizeBytes)
+	right := make([]byte, spec.DAGSizeBytes)
+	if err := GenerateDAG(spec, left, []byte("0123456789abcdef0123456789abcdef"), 2); err != nil {
+		t.Fatalf("GenerateDAG left: %v", err)
+	}
+	if err := GenerateDAG(spec, right, []byte("fedcba9876543210fedcba9876543210"), 2); err != nil {
+		t.Fatalf("GenerateDAG right: %v", err)
+	}
+	if bytes.Equal(left, right) {
+		t.Fatal("expected different DAG output for different seeds")
+	}
+}
+
 func TestLatticeHashDeterministic(t *testing.T) {
 	spec := testSpec()
 	seed := []byte("0123456789abcdef0123456789abcdef")
@@ -48,13 +63,13 @@ func TestLatticeHashDeterministic(t *testing.T) {
 	header := []byte("header")
 	nonce := uint64(42)
 
-	first := LatticeHash(header, nonce, accessor, nil)
-	second := LatticeHash(header, nonce, accessor, nil)
+	first := LatticeHash(spec, header, nonce, accessor, nil)
+	second := LatticeHash(spec, header, nonce, accessor, nil)
 	if first != second {
 		t.Fatalf("expected deterministic lattice hash; first=%x second=%x", first.Pow256, second.Pow256)
 	}
 
-	third := LatticeHash(header, nonce+1, accessor, nil)
+	third := LatticeHash(spec, header, nonce+1, accessor, nil)
 	if first == third {
 		t.Fatal("expected nonce change to alter lattice hash")
 	}
@@ -81,5 +96,16 @@ func TestLessOrEqualBETargetComparison(t *testing.T) {
 	}
 	if LessOrEqualBE(higher, target) {
 		t.Fatal("expected higher digest to fail target comparison")
+	}
+}
+
+func TestStrictModeConstantEnforcement(t *testing.T) {
+	strict := StrictSpec()
+	if err := strict.Validate(); err != nil {
+		t.Fatalf("StrictSpec should validate: %v", err)
+	}
+	strict.DAGSizeBytes = 1024
+	if err := strict.Validate(); err == nil {
+		t.Fatal("expected strict spec override to fail validation")
 	}
 }
