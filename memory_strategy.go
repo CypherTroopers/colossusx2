@@ -13,6 +13,36 @@ type MemoryStrategy interface {
 	cx.Allocator
 }
 
+type fallbackMemoryStrategy struct {
+	name       string
+	strategies []MemoryStrategy
+}
+
+func (m fallbackMemoryStrategy) Alloc(size uint64) (cx.Allocation, error) {
+	var errs []string
+	for _, strategy := range m.strategies {
+		if strategy == nil {
+			continue
+		}
+		alloc, err := strategy.Alloc(size)
+		if err == nil {
+			return alloc, nil
+		}
+		errs = append(errs, fmt.Sprintf("%s: %v", strategy.Name(), err))
+	}
+	if len(errs) == 0 {
+		return nil, fmt.Errorf("%s: no allocation strategies configured", m.Name())
+	}
+	return nil, fmt.Errorf("%s: %s", m.Name(), strings.Join(errs, "; "))
+}
+
+func (m fallbackMemoryStrategy) Name() string {
+	if m.name == "" {
+		return "fallback"
+	}
+	return m.name
+}
+
 type sliceAllocation struct {
 	name string
 	buf  []byte
@@ -72,7 +102,14 @@ func selectDAGStrategy(backend BackendMode, dagAlloc string) (MemoryStrategy, er
 	if choice == "auto" {
 		switch backend {
 		case BackendCPU, BackendUnified, BackendGPU:
-			return GoHeapMemory{}, nil
+			return fallbackMemoryStrategy{
+				name: "auto",
+				strategies: []MemoryStrategy{
+					CUDAManagedMemory{},
+					OpenCLSVM{},
+					GoHeapMemory{},
+				},
+			}, nil
 		default:
 			return nil, fmt.Errorf("unsupported backend %q", backend)
 		}

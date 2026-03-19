@@ -58,8 +58,16 @@ func TestSelectDAGStrategy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("selectDAGStrategy: %v", err)
 	}
-	if strategy.Name() != "go-heap" {
-		t.Fatalf("expected go-heap, got %q", strategy.Name())
+	if strategy.Name() != "auto" {
+		t.Fatalf("expected auto, got %q", strategy.Name())
+	}
+	alloc, err := strategy.Alloc(64)
+	if err != nil {
+		t.Fatalf("Alloc: %v", err)
+	}
+	defer alloc.Free()
+	if alloc.Name() != "go-heap" {
+		t.Fatalf("expected auto strategy to fall back to go-heap in test environment, got %q", alloc.Name())
 	}
 	if _, err := selectDAGStrategy(BackendUnified, "bogus"); err == nil {
 		t.Fatal("expected invalid dag strategy to fail")
