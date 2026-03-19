@@ -1,7 +1,5 @@
 package main
 
-import "fmt"
-
 type cpuNode [64]byte
 
 type cpuDAGView struct{ nodes []cpuNode }
@@ -16,11 +14,11 @@ type CPUBackend struct {
 
 func (b *CPUBackend) Mode() BackendMode { return BackendCPU }
 func (b *CPUBackend) Description() string {
-	return "cpu backend with a dedicated prepared node table and pooled worker scratch"
+	return "cpu miner with a dedicated prepared node table and pooled worker scratch"
 }
 func (b *CPUBackend) Prepare(dag *DAG) error {
 	if dag == nil {
-		return fmt.Errorf("cpu backend requires a dag")
+		return ErrNilDAG
 	}
 	if b.scratch == nil {
 		b.scratch = newPooledScratch()

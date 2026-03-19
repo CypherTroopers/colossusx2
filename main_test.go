@@ -44,6 +44,28 @@ func TestCPUAndUnifiedBackendsProduceSameHash(t *testing.T) {
 	}
 }
 
+func TestUnifiedBackendSharesPreparedDAGMemory(t *testing.T) {
+	spec := Spec{DAGSizeBytes: 64 * 8, NodeSize: DefaultNodeSize, ReadsPerHash: 4, EpochBlocks: DefaultEpochBlocks}
+	dag, err := NewDAG(spec)
+	if err != nil {
+		t.Fatalf("NewDAG: %v", err)
+	}
+	if err := GenerateDAG(dag, []byte("seedseedseedseedseedseedseedseed"), 1); err != nil {
+		t.Fatalf("GenerateDAG: %v", err)
+	}
+	backend := &UnifiedBackend{}
+	if err := backend.Prepare(dag); err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+	original := backend.Hash([]byte("header"), 1, dag)
+
+	copy(dag.Node(0), make([]byte, 64))
+	mutated := backend.Hash([]byte("header"), 1, dag)
+	if original == mutated {
+		t.Fatal("expected unified backend to observe DAG mutations through shared memory")
+	}
+}
+
 func TestCPUBackendCopiesPreparedDAG(t *testing.T) {
 	spec := Spec{DAGSizeBytes: 64 * 8, NodeSize: DefaultNodeSize, ReadsPerHash: 4, EpochBlocks: DefaultEpochBlocks}
 	dag, err := NewDAG(spec)
