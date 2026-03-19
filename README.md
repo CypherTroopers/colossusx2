@@ -31,6 +31,8 @@ A compatibility path still exists for development and testing:
 
 This compatibility mode does **not** change the strict path or silently weaken strict-mode validation.
 
+The codebase now also carries a nonce abstraction at the hashing boundary so a future 256-bit nonce upgrade can be introduced without rewriting every backend at once; the active miner still iterates a uint64 nonce range today.
+
 ## Algorithm summary
 
 ### 1. DAG generation
@@ -42,12 +44,12 @@ For each node index `i`:
 
 ### 2. Lattice hash
 
-- `seed = sha3_512(header ++ nonce)`
+- `seed = sha3_512(header ++ nonce_bytes)`
 - `mix = first 32 bytes of seed`
 - repeat `READS_PER_H` rounds:
   - `node_idx = fnv1a(mix ++ round_index) % NODE_COUNT`
   - `node_data = dag[node_idx]`
-  - `mix = blake3(mix XOR node_data)`
+  - `mix = blake3((mix XOR node_data[0:32]) ++ (mix XOR node_data[32:64]))`
 - `result = sha3_512(seed ++ mix)`
 
 ### 3. Mining loop

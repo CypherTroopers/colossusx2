@@ -2,7 +2,11 @@
 
 package main
 
-import "fmt"
+import (
+	"fmt"
+
+	cx "colossusx/colossusx"
+)
 
 type gpuKernelConfig struct {
 	WorkgroupSize int
@@ -34,7 +38,7 @@ type GPUDispatchResult struct {
 
 type GPUDispatcher interface {
 	Prepare(*DAG, gpuKernelConfig) error
-	Dispatch(header []byte, startNonce uint64, batch int, dag *DAG) (GPUDispatchResult, error)
+	Dispatch(header []byte, startNonce cx.Nonce, batch int, dag *DAG) (GPUDispatchResult, error)
 	Plan() GPUExecutionPlan
 }
 
@@ -58,7 +62,7 @@ func (d *openclDispatcherStub) Prepare(dag *DAG, cfg gpuKernelConfig) error {
 	return ErrNotImplemented("OpenCL kernel source is not yet hash-equivalent to CPU reference implementation")
 }
 
-func (d *openclDispatcherStub) Dispatch(header []byte, startNonce uint64, batch int, dag *DAG) (GPUDispatchResult, error) {
+func (d *openclDispatcherStub) Dispatch(header []byte, startNonce cx.Nonce, batch int, dag *DAG) (GPUDispatchResult, error) {
 	_, _, _, _ = header, startNonce, batch, dag
 	return GPUDispatchResult{}, ErrNotImplemented("OpenCL dispatch is not implemented")
 }
@@ -82,14 +86,14 @@ func (b *GPUBackend) Prepare(dag *DAG) error {
 	}
 	return b.dispatcher.Prepare(dag, b.config)
 }
-func (b *GPUBackend) Hash(header []byte, nonce uint64, dag *DAG) HashResult {
+func (b *GPUBackend) Hash(header []byte, nonce cx.Nonce, dag *DAG) HashResult {
 	results, err := b.HashBatch(header, nonce, 1, dag)
 	if err != nil || len(results) == 0 {
 		return HashResult{}
 	}
 	return results[0]
 }
-func (b *GPUBackend) HashBatch(header []byte, startNonce uint64, count uint64, dag *DAG) ([]HashResult, error) {
+func (b *GPUBackend) HashBatch(header []byte, startNonce cx.Nonce, count uint64, dag *DAG) ([]HashResult, error) {
 	if b.dispatcher == nil {
 		b.dispatcher = &openclDispatcherStub{}
 	}

@@ -61,7 +61,7 @@ func TestLatticeHashDeterministic(t *testing.T) {
 	}
 	accessor := sliceAccessor{spec: spec, buf: dag}
 	header := []byte("header")
-	nonce := uint64(42)
+	nonce := NewUint64Nonce(42)
 
 	first := LatticeHash(spec, header, nonce, accessor, nil)
 	second := LatticeHash(spec, header, nonce, accessor, nil)
@@ -69,7 +69,8 @@ func TestLatticeHashDeterministic(t *testing.T) {
 		t.Fatalf("expected deterministic lattice hash; first=%x second=%x", first.Pow256, second.Pow256)
 	}
 
-	third := LatticeHash(spec, header, nonce+1, accessor, nil)
+	thirdNonce, _ := nonce.AddUint64(1)
+	third := LatticeHash(spec, header, thirdNonce, accessor, nil)
 	if first == third {
 		t.Fatal("expected nonce change to alter lattice hash")
 	}
@@ -107,5 +108,38 @@ func TestStrictModeConstantEnforcement(t *testing.T) {
 	strict.DAGSizeBytes = 1024
 	if err := strict.Validate(); err == nil {
 		t.Fatal("expected strict spec override to fail validation")
+	}
+}
+
+func TestGenerateDAGUsesKeccak512(t *testing.T) {
+	spec := testSpec()
+	seed := []byte("0123456789abcdef0123456789abcdef")
+	dag := make([]byte, spec.DAGSizeBytes)
+	if err := GenerateDAG(spec, dag, seed, 1); err != nil {
+		t.Fatalf("GenerateDAG: %v", err)
+	}
+	want := keccak512(append(append([]byte{}, seed...), make([]byte, 8)...))
+	if got := dag[:64]; !bytes.Equal(got, want[:]) {
+		t.Fatalf("node 0 mismatch: got=%x want=%x", got, want[:])
+	}
+}
+
+func TestBlake3RoundInputUsesBothNodeHalves(t *testing.T) {
+	var mix [32]byte
+	var node [64]byte
+	for i := range mix {
+		mix[i] = byte(i + 1)
+	}
+	for i := range node {
+		node[i] = byte(255 - i)
+	}
+	in := blake3RoundInput(mix, node)
+	for i := 0; i < 32; i++ {
+		if in[i] != mix[i]^node[i] {
+			t.Fatalf("first half mismatch at %d", i)
+		}
+		if in[32+i] != mix[i]^node[32+i] {
+			t.Fatalf("second half mismatch at %d", i)
+		}
 	}
 }

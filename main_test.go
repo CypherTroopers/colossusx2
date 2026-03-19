@@ -46,7 +46,7 @@ func TestCPUAndUnifiedBackendsProduceSameHash(t *testing.T) {
 		t.Fatalf("GenerateDAG: %v", err)
 	}
 	header := []byte("header")
-	nonce := uint64(42)
+	nonce := cx.NewUint64Nonce(42)
 
 	cpu := &CPUBackend{}
 	unified := &UnifiedBackend{}
@@ -78,10 +78,10 @@ func TestUnifiedBackendUsesDAGAllocationDirectly(t *testing.T) {
 	if err := backend.Prepare(dag); err != nil {
 		t.Fatalf("Prepare: %v", err)
 	}
-	original := backend.Hash([]byte("header"), 1, dag)
+	original := backend.Hash([]byte("header"), cx.NewUint64Nonce(1), dag)
 
 	copy(dag.Bytes(), make([]byte, len(dag.Bytes())))
-	mutated := backend.Hash([]byte("header"), 1, dag)
+	mutated := backend.Hash([]byte("header"), cx.NewUint64Nonce(1), dag)
 	if original == mutated {
 		t.Fatal("expected unified backend to observe DAG mutations through shared memory")
 	}
@@ -101,10 +101,10 @@ func TestCPUBackendCopiesPreparedDAG(t *testing.T) {
 	if err := backend.Prepare(dag); err != nil {
 		t.Fatalf("Prepare: %v", err)
 	}
-	original := backend.Hash([]byte("header"), 1, dag)
+	original := backend.Hash([]byte("header"), cx.NewUint64Nonce(1), dag)
 
 	copy(dag.Bytes(), make([]byte, len(dag.Bytes())))
-	mutated := backend.Hash([]byte("header"), 1, dag)
+	mutated := backend.Hash([]byte("header"), cx.NewUint64Nonce(1), dag)
 	if original != mutated {
 		t.Fatal("expected prepared CPU backend to keep using its own copied DAG")
 	}

@@ -1,6 +1,10 @@
 package main
 
-import "fmt"
+import (
+	"fmt"
+
+	cx "colossusx/colossusx"
+)
 
 type UnifiedBackend struct {
 	spec         Spec
@@ -38,7 +42,7 @@ func (b *UnifiedBackend) Prepare(dag *DAG) error {
 	return nil
 }
 
-func (b *UnifiedBackend) Hash(header []byte, nonce uint64, dag *DAG) HashResult {
+func (b *UnifiedBackend) Hash(header []byte, nonce cx.Nonce, dag *DAG) HashResult {
 	if b.shared.NodeCount() == 0 {
 		if err := b.Prepare(dag); err != nil {
 			return HashResult{}
@@ -49,7 +53,7 @@ func (b *UnifiedBackend) Hash(header []byte, nonce uint64, dag *DAG) HashResult 
 	return latticeHashWithAccessor(b.spec, header, nonce, b.shared, s)
 }
 
-func (b *UnifiedBackend) HashBatch(header []byte, startNonce uint64, count uint64, dag *DAG) ([]HashResult, error) {
+func (b *UnifiedBackend) HashBatch(header []byte, startNonce cx.Nonce, count uint64, dag *DAG) ([]HashResult, error) {
 	if b.shared.NodeCount() == 0 {
 		if err := b.Prepare(dag); err != nil {
 			return nil, err
@@ -57,7 +61,11 @@ func (b *UnifiedBackend) HashBatch(header []byte, startNonce uint64, count uint6
 	}
 	results := make([]HashResult, count)
 	for i := uint64(0); i < count; i++ {
-		results[i] = b.Hash(header, startNonce+i, dag)
+		nonce, ok := startNonce.AddUint64(i)
+		if !ok {
+			return results[:i], nil
+		}
+		results[i] = b.Hash(header, nonce, dag)
 	}
 	return results, nil
 }
