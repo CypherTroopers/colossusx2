@@ -23,11 +23,15 @@ Unlike traditional GPU mining algorithms optimized for 8–24 GB VRAM devices, C
 
 The algorithm uses a massive **Directed Acyclic Graph (DAG)** that cannot be practically resident on ordinary consumer GPUs. Mining is based on **graph-traversal-driven memory-hard computation**, where sustained random-access bandwidth is the primary bottleneck rather than raw arithmetic throughput.
 
+While the strict production-oriented profile targets an **80 GB DAG**, implementations may also expose **32 GB, 16 GB, and 8 GB research profiles** for development, validation, benchmarking, and staged implementation work. These smaller profiles are explicitly **non-strict** and must not be confused with the primary COLOSSUS-X deployment target.
+
 ---
 
 ## Architecture
 
-### 1. Titan DAG — 80 GB Working Set
+### 1. Titan DAG — Primary and Research Working Sets
+
+#### Primary Strict Profile
 
 **Parameters**
 - DAG Size: **80 GB**
@@ -40,6 +44,26 @@ The algorithm uses a massive **Directed Acyclic Graph (DAG)** that cannot be pra
 - Hashing performs random 64-byte reads across the entire DAG.
 - External memory substitution or practical CPU-side solving is intentionally discouraged by the size and bandwidth requirements.
 - The DAG is regenerated every 8,000 blocks.
+
+#### Research / Development Profiles
+
+**Parameters**
+- DAG Size: **32 GB**
+- DAG Size: **16 GB**
+- DAG Size: **8 GB**
+- Node Size: **64 bytes**
+- Epoch Length: **8,000 blocks**
+
+**Approximate Node Counts**
+- **32 GB**: ~536.9 million nodes
+- **16 GB**: ~268.4 million nodes
+- **8 GB**: ~134.2 million nodes
+
+**Properties**
+- These smaller DAG profiles exist for research, staged implementation, testing, and benchmarking.
+- They preserve the same node size and overall lattice-hash structure.
+- They are not equivalent to the strict 80 GB resistance profile.
+- They must be treated as **non-strict / research-only** execution modes.
 
 ---
 
@@ -92,31 +116,39 @@ The algorithm uses a massive **Directed Acyclic Graph (DAG)** that cannot be pra
 ### 5. Adaptive Work Partitioner
 
 **Parameters**
-- Partitions: **16 × 5 GB**
+- Partitions: **16 × 5 GB** in the 80 GB strict profile
 - Ownership: **Per CU / SM cluster**
 - Rebalance Trigger: **Thermal + Power telemetry**
 - Cache Strategy: **L2 locality-aware**
 
 **Properties**
-- The 80 GB DAG is partitioned into sixteen 5 GB regions.
+- In the strict profile, the 80 GB DAG is partitioned into sixteen 5 GB regions.
 - Each CU / SM cluster is intended to primarily operate on an assigned region.
 - Work can be dynamically rebalanced according to thermal and power telemetry.
 - The scheduler should prefer locality where possible.
+
+**Research-profile note**
+- Smaller research profiles may use proportionally smaller partition layouts while preserving the same scheduling model.
+- Such layouts are implementation profiles, not changes to the strict 80 GB algorithm target.
 
 ---
 
 ### 6. ASIC / CPU Resistance Layer
 
 **Parameters**
-- Minimum Required VRAM: **88 GB**
+- Minimum Required VRAM for strict profile: **88 GB**
 - Typical CPU DDR5 Bandwidth: **~100 GB/s**
 - ASIC Practicality: **Low**
-- Typical Discrete GPU Viability: **No**
+- Typical Discrete GPU Viability: **No** for the strict profile
 
 **Properties**
 - The 80 GB DAG makes large on-die memory integration economically prohibitive for ASICs.
 - CPU memory bandwidth is far below the intended operating envelope.
-- Typical 16–32 GB discrete GPUs cannot hold the DAG and are therefore not target hardware.
+- Typical 16–32 GB discrete GPUs cannot hold the strict DAG and are therefore not target hardware.
+
+**Research-profile note**
+- 32 GB, 16 GB, and 8 GB modes may be executable on smaller systems for development purposes.
+- Those profiles intentionally relax the strict memory-residency requirement and therefore do not provide the same resistance properties as the 80 GB strict profile.
 
 ---
 
@@ -129,7 +161,7 @@ The primary bottleneck is intended to be **memory bandwidth**, not raw arithmeti
 The 80 GB DAG is intended to be **shared with zero-copy semantics** between CPU and GPU on suitable architectures.
 
 ### Egalitarian by Design
-The algorithm intentionally targets only systems with sufficiently large unified-memory pools and bandwidth.
+The algorithm intentionally targets only systems with sufficiently large unified-memory pools and bandwidth in strict mode.
 
 ### Long Epoch Stability
 An 8,000-block epoch reduces DAG regeneration overhead and keeps the memory image stable for a long interval.
@@ -143,32 +175,3 @@ CONST DAG_SIZE     = 80 * 1024^3
 CONST NODE_SIZE    = 64
 CONST READS_PER_H  = 512
 CONST EPOCH_BLOCKS = 8000
-```
-
-## Normative Algorithm
-
-### DAG Generation
-
-For node index `i`, using `i` encoded as an unsigned 64-bit little-endian integer in the current implementation profile:
-
-```text
-dag[i] = keccak512(epoch_seed ++ i)
-```
-
-### LatticeHash
-
-```text
-seed = sha3_512(header ++ nonce_bytes)
-mix  = seed[0:32]
-for round in 0..READS_PER_H-1:
-    node_idx = fnv1a64(mix ++ le64(round)) mod NODE_COUNT
-    node     = dag[node_idx]                  // 64 bytes
-    blake_in = (mix XOR node[0:32]) ++ (mix XOR node[32:64])
-    mix      = blake3_256(blake_in)           // 32 bytes
-result = sha3_512(seed ++ mix)
-```
-
-`mix` is always 32 bytes. `node` is always 64 bytes. The Blake3 round input is therefore the deterministic 64-byte concatenation of the mix XORed with each 32-byte half of the node.
-
-The current codebase introduces a nonce abstraction at the hashing boundary to make a later 256-bit nonce upgrade straightforward, but the active mining loop still steps through a uint64-backed nonce range today.
-
