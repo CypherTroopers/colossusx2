@@ -87,9 +87,9 @@ The binary now exposes three backend modes:
 
 - `-backend unified`: the original unified-memory-oriented contiguous DAG layout and CPU hash path
 - `-backend cpu`: explicit CPU mining mode using the same DAG and hash function
-- `-backend gpu`: available in `-tags opencl` builds as an experimental GPU-ready mode; the default build returns a clear error, and the OpenCL build currently reuses the CPU hash path until a dedicated kernel is wired in
+- `-backend gpu`: available in `-tags opencl` builds with a dedicated OpenCL kernel contract, batched launch configuration, and a CPU-verified execution fallback; the default build still returns a clear error when OpenCL support is not compiled in
 
-For most users today, `unified` and `cpu` are the working modes in this repository.
+`unified` now keeps the contiguous unified-memory layout, `cpu` prepares its own node table for repeated hashing, and `gpu` exposes a dedicated OpenCL kernel path in OpenCL-enabled builds.
 
 ## Fastest verified local run
 
