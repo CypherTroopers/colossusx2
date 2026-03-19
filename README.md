@@ -27,7 +27,7 @@ A compatibility path still exists for development and testing:
 - use `-mode research`
 - use smaller DAGs or alternate read counts for local tests
 - keep the exact same core algorithm implementation
-- rely on Go heap allocation as the fallback memory model when unified-memory-capable transports are unavailable
+- prefer real unified-memory-capable allocations when available (CUDA managed memory / OpenCL SVM), while keeping Go heap as the fallback memory model
 
 This compatibility mode does **not** change the strict path or silently weaken strict-mode validation.
 
