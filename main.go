@@ -2,9 +2,7 @@ package main
 
 import (
 	"context"
-	"encoding/binary"
 	"encoding/hex"
-	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -15,14 +13,14 @@ import (
 	"sync/atomic"
 	"time"
 
-	"golang.org/x/crypto/sha3"
+	cx "colossusx/colossusx"
 )
 
 const (
-	DefaultDAGMiB      = 256
-	DefaultReadsPerH   = 64
-	DefaultNodeSize    = 64
-	DefaultEpochBlocks = 8000
+	DefaultDAGMiB      = cx.DAGSizeBytes / (1024 * 1024)
+	DefaultReadsPerH   = cx.ReadsPerHash
+	DefaultNodeSize    = cx.NodeSize
+	DefaultEpochBlocks = cx.EpochBlocks
 )
 
 type BackendMode string
@@ -33,32 +31,9 @@ const (
 	BackendGPU     BackendMode = "gpu"
 )
 
-type Spec struct {
-	DAGSizeBytes uint64
-	NodeSize     uint64
-	ReadsPerHash uint64
-	EpochBlocks  uint64
-}
-
-func (s Spec) Validate() error {
-	if s.DAGSizeBytes == 0 {
-		return errors.New("dag size must be > 0")
-	}
-	if s.NodeSize != 64 {
-		return errors.New("this research spec currently requires 64-byte nodes")
-	}
-	if s.ReadsPerHash == 0 {
-		return errors.New("reads/hash must be > 0")
-	}
-	if s.DAGSizeBytes%s.NodeSize != 0 {
-		return fmt.Errorf("dag size must be multiple of node size (%d)", s.NodeSize)
-	}
-	return nil
-}
-
-func (s Spec) NodeCount() uint64 {
-	return s.DAGSizeBytes / s.NodeSize
-}
+type Spec = cx.Spec
+type Target = cx.Target
+type HashResult = cx.HashResult
 
 type DAG struct {
 	spec      Spec
@@ -71,13 +46,13 @@ func NewDAGWithAllocation(spec Spec, alloc managedAllocation, ownership bool) (*
 		return nil, err
 	}
 	if alloc == nil {
-		return nil, errors.New("dag allocation cannot be nil")
+		return nil, fmt.Errorf("dag allocation cannot be nil")
 	}
 	if uint64(len(alloc.Bytes())) < spec.DAGSizeBytes {
 		if ownership {
 			_ = alloc.Free()
 		}
-		return nil, errors.New("managed allocation is smaller than the DAG")
+		return nil, fmt.Errorf("managed allocation is smaller than the DAG")
 	}
 	return &DAG{spec: spec, alloc: alloc, ownership: ownership}, nil
 }
@@ -93,20 +68,13 @@ func NewDAGWithStrategy(spec Spec, strategy MemoryStrategy) (*DAG, error) {
 	return NewDAGWithAllocation(spec, alloc, true)
 }
 
-func NewDAG(spec Spec) (*DAG, error) {
-	return NewDAGWithStrategy(spec, GoHeapMemory{})
-}
-
-func (d *DAG) NodeCount() uint64 {
-	return d.spec.NodeCount()
-}
-
+func NewDAG(spec Spec) (*DAG, error) { return NewDAGWithStrategy(spec, GoHeapMemory{}) }
+func (d *DAG) NodeCount() uint64     { return d.spec.NodeCount() }
 func (d *DAG) Node(i uint64) []byte {
 	off := i * d.spec.NodeSize
 	buf := d.Bytes()
 	return buf[off : off+d.spec.NodeSize]
 }
-
 func (d *DAG) Bytes() []byte {
 	if d == nil || d.alloc == nil {
 		return nil
@@ -117,7 +85,6 @@ func (d *DAG) Bytes() []byte {
 	}
 	return buf
 }
-
 func (d *DAG) Close() error {
 	if d == nil || d.alloc == nil || !d.ownership {
 		return nil
@@ -128,29 +95,8 @@ func (d *DAG) Close() error {
 	return err
 }
 
-type Target [32]byte
-
-func ParseTargetHex(s string) (Target, error) {
-	var t Target
-	b, err := hex.DecodeString(s)
-	if err != nil {
-		return t, err
-	}
-	if len(b) != 32 {
-		return t, fmt.Errorf("target must be exactly 32 bytes, got %d", len(b))
-	}
-	copy(t[:], b)
-	return t, nil
-}
-
-func (t Target) String() string {
-	return hex.EncodeToString(t[:])
-}
-
-type HashResult struct {
-	Pow256  [32]byte
-	Full512 [64]byte
-}
+func ParseTargetHex(s string) (Target, error) { return cx.ParseTargetHex(s) }
+func LessOrEqualBE(a [32]byte, b Target) bool { return cx.LessOrEqualBE(a, b) }
 
 type MineResult struct {
 	Nonce      uint64
@@ -186,12 +132,7 @@ func NewMiner(spec Spec, dag *DAG, workers int, backend HashBackend) (*Miner, er
 	if err := backend.Prepare(dag); err != nil {
 		return nil, err
 	}
-	return &Miner{
-		spec:    spec,
-		dag:     dag,
-		workers: workers,
-		backend: backend,
-	}, nil
+	return &Miner{spec: spec, dag: dag, workers: workers, backend: backend}, nil
 }
 
 func parseBackendMode(s string) (BackendMode, error) {
@@ -217,13 +158,14 @@ func newBackend(mode BackendMode) (HashBackend, error) {
 }
 
 func main() {
+	defaultSpec := cx.DefaultSpec()
 	var (
 		backendName  = flag.String("backend", string(BackendUnified), "mining backend: unified, cpu, or gpu")
 		dagAlloc     = flag.String("dag-alloc", "auto", "dag allocation strategy: auto, go-heap, pinned-host, cuda-managed, opencl-svm")
 		dagMiB       = flag.Uint64("dag-mib", DefaultDAGMiB, "DAG size in MiB")
-		reads        = flag.Uint64("reads", DefaultReadsPerH, "random DAG reads per hash")
+		reads        = flag.Uint64("reads", cx.ReadsPerHash, "random DAG reads per hash")
 		workers      = flag.Int("workers", runtime.NumCPU(), "mining worker count")
-		epochBlocks  = flag.Uint64("epoch-blocks", DefaultEpochBlocks, "blocks per epoch")
+		epochBlocks  = flag.Uint64("epoch-blocks", cx.EpochBlocks, "blocks per epoch")
 		headerHex    = flag.String("header", "434f4c4f535355532d582d544553542d4845414445522d303031", "header bytes in hex")
 		epochSeedHex = flag.String("epoch-seed", "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff", "epoch seed in hex")
 		targetHex    = flag.String("target", "00ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", "32-byte big-endian target hex")
@@ -242,12 +184,10 @@ func main() {
 		log.Fatal(err)
 	}
 
-	spec := Spec{
-		DAGSizeBytes: (*dagMiB) * 1024 * 1024,
-		NodeSize:     DefaultNodeSize,
-		ReadsPerHash: *reads,
-		EpochBlocks:  *epochBlocks,
-	}
+	spec := defaultSpec
+	spec.DAGSizeBytes = (*dagMiB) * 1024 * 1024
+	spec.ReadsPerHash = *reads
+	spec.EpochBlocks = *epochBlocks
 	if err := spec.Validate(); err != nil {
 		log.Fatal(err)
 	}
@@ -265,7 +205,12 @@ func main() {
 		log.Fatalf("invalid target: %v", err)
 	}
 
-	fmt.Println("COLOSSUS-X research miner")
+	fmt.Println("COLOSSUS-X miner")
+	if spec.IsSpecLocked() {
+		fmt.Println("mode: spec-locked COLOSSUS-X core")
+	} else {
+		fmt.Println("mode: research compatibility")
+	}
 	fmt.Printf("backend: %s (%s)\n", backend.Mode(), backend.Description())
 	fmt.Printf("dag: %d MiB\n", spec.DAGSizeBytes/(1024*1024))
 	fmt.Printf("node size: %d bytes\n", spec.NodeSize)
@@ -323,48 +268,7 @@ func main() {
 }
 
 func GenerateDAG(dag *DAG, epochSeed []byte, workers int) error {
-	if len(epochSeed) == 0 {
-		return errors.New("epoch seed cannot be empty")
-	}
-	if workers <= 0 {
-		workers = runtime.NumCPU()
-	}
-
-	nodeCount := dag.NodeCount()
-	chunk := nodeCount / uint64(workers)
-	if chunk == 0 {
-		chunk = 1
-	}
-
-	var wg sync.WaitGroup
-
-	for w := 0; w < workers; w++ {
-		from := uint64(w) * chunk
-		to := from + chunk
-		if w == workers-1 || to > nodeCount {
-			to = nodeCount
-		}
-		if from >= nodeCount {
-			break
-		}
-
-		wg.Add(1)
-		go func(from, to uint64) {
-			defer wg.Done()
-
-			tmp := make([]byte, len(epochSeed)+8)
-			copy(tmp, epochSeed)
-
-			for i := from; i < to; i++ {
-				binary.LittleEndian.PutUint64(tmp[len(epochSeed):], i)
-				sum := sha3.Sum512(tmp)
-				copy(dag.Node(i), sum[:])
-			}
-		}(from, to)
-	}
-
-	wg.Wait()
-	return nil
+	return cx.GenerateDAG(dag.spec, dag.Bytes(), epochSeed, workers)
 }
 
 func (m *Miner) Mine(header []byte, target Target, startNonce, maxNonces uint64) (MineResult, bool) {
@@ -502,29 +406,4 @@ func Benchmark(m *Miner, header []byte, startNonce, maxNonces uint64) {
 	fmt.Printf("hashes: %d\n", maxNonces)
 	fmt.Printf("elapsed: %s\n", elapsed.Round(time.Millisecond))
 	fmt.Printf("hashrate: %.2f H/s\n", float64(maxNonces)/elapsed.Seconds())
-}
-
-func fnv1a64(data []byte) uint64 {
-	const (
-		offset64 = 14695981039346656037
-		prime64  = 1099511628211
-	)
-	var h uint64 = offset64
-	for _, b := range data {
-		h ^= uint64(b)
-		h *= prime64
-	}
-	return h
-}
-
-func LessOrEqualBE(a [32]byte, b Target) bool {
-	for i := 0; i < 32; i++ {
-		if a[i] < b[i] {
-			return true
-		}
-		if a[i] > b[i] {
-			return false
-		}
-	}
-	return true
 }

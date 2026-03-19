@@ -44,7 +44,7 @@ func (b *UnifiedBackend) Hash(header []byte, nonce uint64, dag *DAG) HashResult 
 	}
 	s := b.scratch.acquire(len(header))
 	defer b.scratch.release(s)
-	return latticeHashWithAccessor(header, nonce, dag.spec.ReadsPerHash, b.shared, s)
+	return latticeHashWithAccessor(header, nonce, b.shared, s)
 }
 
 func (b *UnifiedBackend) HashBatch(header []byte, startNonce uint64, count uint64, dag *DAG) ([]HashResult, error) {
