@@ -36,7 +36,7 @@ func (b *CPUBackend) Hash(header []byte, nonce uint64, dag *DAG) HashResult {
 	}
 	s := b.scratch.acquire(len(header))
 	defer b.scratch.release(s)
-	return latticeHashWithAccessor(header, nonce, dag.spec.ReadsPerHash, cpuDAGView{nodes: b.nodes}, s)
+	return latticeHashWithAccessor(header, nonce, cpuDAGView{nodes: b.nodes}, s)
 }
 
 func (b *CPUBackend) HashBatch(header []byte, startNonce uint64, count uint64, dag *DAG) ([]HashResult, error) {

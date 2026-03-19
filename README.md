@@ -1,4 +1,4 @@
-`colossusx` is a minimal COLOSSUS-X research miner written in Go. It runs as a single binary, generates its DAG at startup, and then executes either a benchmark or a mining loop across selectable `unified memory`, `cpu`, and `gpu` miner backends.
+`colossusx` is a minimal COLOSSUS-X miner written in Go. The repository now exposes a dedicated `colossusx/` core package for the spec-locked algorithm while keeping the CLI and research backends usable. It generates its DAG at startup, and then executes either a benchmark or a mining loop across selectable `unified memory`, `cpu`, and `gpu` miner backends.
 
 This README was written by inspecting the current codebase so that a new user can go from a fresh environment to a verified local run.
 
@@ -40,7 +40,8 @@ go mod download
 
 This repository is intentionally small. The main files are:
 
-- `main.go`: CLI entrypoint, DAG generation, benchmark loop, and mining loop
+- `main.go`: CLI entrypoint, backend selection, benchmark loop, and mining loop
+- `colossusx/`: spec-locked COLOSSUS-X core package with constants, DAG generation, target comparison, and LatticeHash
 - `go.mod`: module definition and Go version
 - `go.sum`: dependency checksums
 - `Makefile`: convenience targets for the most common local workflows
