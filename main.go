@@ -15,7 +15,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/zeebo/blake3"
 	"golang.org/x/crypto/sha3"
 )
 
@@ -130,28 +129,6 @@ type HashBackend interface {
 	Hash(header []byte, nonce uint64, dag *DAG) HashResult
 }
 
-type UnifiedBackend struct{}
-
-func (UnifiedBackend) Mode() BackendMode { return BackendUnified }
-func (UnifiedBackend) Description() string {
-	return "unified memory backend using a contiguous DAG buffer"
-}
-func (UnifiedBackend) Prepare(*DAG) error { return nil }
-func (UnifiedBackend) Hash(header []byte, nonce uint64, dag *DAG) HashResult {
-	return LatticeHash(header, nonce, dag)
-}
-
-type CPUBackend struct{}
-
-func (CPUBackend) Mode() BackendMode { return BackendCPU }
-func (CPUBackend) Description() string {
-	return "cpu backend using the same DAG layout and CPU hashing path"
-}
-func (CPUBackend) Prepare(*DAG) error { return nil }
-func (CPUBackend) Hash(header []byte, nonce uint64, dag *DAG) HashResult {
-	return LatticeHash(header, nonce, dag)
-}
-
 type Miner struct {
 	spec    Spec
 	dag     *DAG
@@ -164,7 +141,7 @@ func NewMiner(spec Spec, dag *DAG, workers int, backend HashBackend) (*Miner, er
 		workers = runtime.NumCPU()
 	}
 	if backend == nil {
-		backend = UnifiedBackend{}
+		backend = &UnifiedBackend{}
 	}
 	if err := backend.Prepare(dag); err != nil {
 		return nil, err
@@ -189,9 +166,9 @@ func parseBackendMode(s string) (BackendMode, error) {
 func newBackend(mode BackendMode) (HashBackend, error) {
 	switch mode {
 	case BackendUnified:
-		return UnifiedBackend{}, nil
+		return &UnifiedBackend{}, nil
 	case BackendCPU:
-		return CPUBackend{}, nil
+		return &CPUBackend{}, nil
 	case BackendGPU:
 		return NewGPUBackend()
 	default:
@@ -439,53 +416,6 @@ func Benchmark(m *Miner, header []byte, startNonce, maxNonces uint64) {
 	fmt.Printf("hashes: %d\n", maxNonces)
 	fmt.Printf("elapsed: %s\n", elapsed.Round(time.Millisecond))
 	fmt.Printf("hashrate: %.2f H/s\n", float64(maxNonces)/elapsed.Seconds())
-}
-
-func LatticeHash(header []byte, nonce uint64, dag *DAG) HashResult {
-	var out HashResult
-
-	nodeCount := dag.NodeCount()
-	if nodeCount == 0 {
-		return out
-	}
-
-	seedInput := make([]byte, len(header)+8)
-	copy(seedInput, header)
-	binary.LittleEndian.PutUint64(seedInput[len(header):], nonce)
-
-	seed512 := sha3.Sum512(seedInput)
-
-	var mix [32]byte
-	copy(mix[:], seed512[:32])
-
-	var fnvInput [40]byte
-	var blakeInput [64]byte
-
-	for r := uint64(0); r < dag.spec.ReadsPerHash; r++ {
-		copy(fnvInput[:32], mix[:])
-		binary.LittleEndian.PutUint64(fnvInput[32:], r)
-
-		nodeIdx := fnv1a64(fnvInput[:]) % nodeCount
-		node := dag.Node(nodeIdx)
-
-		for i := 0; i < 32; i++ {
-			blakeInput[i] = mix[i] ^ node[i]
-			blakeInput[32+i] = node[32+i]
-		}
-
-		sum := blake3.Sum256(blakeInput[:])
-		copy(mix[:], sum[:])
-	}
-
-	finalInput := make([]byte, 64+32)
-	copy(finalInput[:64], seed512[:])
-	copy(finalInput[64:], mix[:])
-
-	final512 := sha3.Sum512(finalInput)
-	copy(out.Full512[:], final512[:])
-	copy(out.Pow256[:], final512[:32])
-
-	return out
 }
 
 func fnv1a64(data []byte) uint64 {
