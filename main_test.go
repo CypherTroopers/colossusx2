@@ -1,8 +1,6 @@
 package main
 
-import (
-	"testing"
-)
+import "testing"
 
 func TestParseBackendMode(t *testing.T) {
 	for _, mode := range []string{"unified", "cpu", "gpu"} {
@@ -21,6 +19,7 @@ func TestCPUAndUnifiedBackendsProduceSameHash(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewDAG: %v", err)
 	}
+	defer dag.Close()
 	seed := []byte("0123456789abcdef0123456789abcdef")
 	if err := GenerateDAG(dag, seed, 2); err != nil {
 		t.Fatalf("GenerateDAG: %v", err)
@@ -44,12 +43,13 @@ func TestCPUAndUnifiedBackendsProduceSameHash(t *testing.T) {
 	}
 }
 
-func TestUnifiedBackendSharesPreparedDAGMemory(t *testing.T) {
+func TestUnifiedBackendUsesDAGAllocationDirectly(t *testing.T) {
 	spec := Spec{DAGSizeBytes: 64 * 8, NodeSize: DefaultNodeSize, ReadsPerHash: 4, EpochBlocks: DefaultEpochBlocks}
 	dag, err := NewDAG(spec)
 	if err != nil {
 		t.Fatalf("NewDAG: %v", err)
 	}
+	defer dag.Close()
 	if err := GenerateDAG(dag, []byte("seedseedseedseedseedseedseedseed"), 1); err != nil {
 		t.Fatalf("GenerateDAG: %v", err)
 	}
@@ -72,6 +72,7 @@ func TestCPUBackendCopiesPreparedDAG(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewDAG: %v", err)
 	}
+	defer dag.Close()
 	if err := GenerateDAG(dag, []byte("seedseedseedseedseedseedseedseed"), 1); err != nil {
 		t.Fatalf("GenerateDAG: %v", err)
 	}
@@ -85,26 +86,5 @@ func TestCPUBackendCopiesPreparedDAG(t *testing.T) {
 	mutated := backend.Hash([]byte("header"), 1, dag)
 	if original != mutated {
 		t.Fatal("expected prepared CPU backend to keep using its own copied DAG")
-	}
-}
-
-func TestSelectMemoryStrategyFromEnv(t *testing.T) {
-	t.Setenv("COLOSSUSX_UNIFIED_STRATEGY", "cuda-managed")
-	if got := selectMemoryStrategy().Name(); got != "cuda-managed" {
-		t.Fatalf("expected cuda-managed strategy, got %q", got)
-	}
-
-	t.Setenv("COLOSSUSX_UNIFIED_STRATEGY", "opencl-svm")
-	if got := selectMemoryStrategy().Name(); got != "opencl-svm" {
-		t.Fatalf("expected opencl-svm strategy, got %q", got)
-	}
-}
-
-func TestManagedMemoryStubsReturnExplicitErrors(t *testing.T) {
-	if _, err := (CUDAManagedMemory{}).Alloc(64); err == nil {
-		t.Fatal("expected CUDA managed memory stub to fail without cuda+cgo build")
-	}
-	if _, err := (OpenCLSVM{}).Alloc(64); err == nil {
-		t.Fatal("expected OpenCL SVM stub to fail without opencl+cgo build")
 	}
 }

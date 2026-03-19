@@ -1,0 +1,99 @@
+package main
+
+import (
+	"fmt"
+	"strings"
+)
+
+type managedAllocation interface {
+	Bytes() []byte
+	Free() error
+	Name() string
+}
+
+type MemoryStrategy interface {
+	Alloc(size uint64) (managedAllocation, error)
+	Name() string
+}
+
+type sliceAllocation struct {
+	name string
+	buf  []byte
+	free func() error
+}
+
+func (a *sliceAllocation) Bytes() []byte { return a.buf }
+func (a *sliceAllocation) Name() string  { return a.name }
+func (a *sliceAllocation) Free() error {
+	if a == nil || a.free == nil {
+		return nil
+	}
+	return a.free()
+}
+
+type GoHeapMemory struct{}
+
+func (GoHeapMemory) Alloc(size uint64) (managedAllocation, error) {
+	return &sliceAllocation{name: "go-heap", buf: make([]byte, size)}, nil
+}
+func (GoHeapMemory) Name() string { return "go-heap" }
+
+type PinnedMemory struct{}
+
+func (PinnedMemory) Alloc(size uint64) (managedAllocation, error) {
+	_ = size
+	return nil, ErrNotImplemented("pinned memory requires platform-specific implementation")
+}
+func (PinnedMemory) Name() string { return "pinned-host" }
+
+type CUDAManagedMemory struct{}
+
+func (m CUDAManagedMemory) Alloc(size uint64) (managedAllocation, error) {
+	return allocCUDAManaged(size)
+}
+func (CUDAManagedMemory) Name() string { return "cuda-managed" }
+
+type OpenCLSVM struct {
+	Context OpenCLContext
+}
+
+func (m OpenCLSVM) Alloc(size uint64) (managedAllocation, error) {
+	return allocOpenCLSVM(m.Context, size)
+}
+func (OpenCLSVM) Name() string { return "opencl-svm" }
+
+type notImplementedError string
+
+func (e notImplementedError) Error() string { return "not implemented: " + string(e) }
+func ErrNotImplemented(s string) error      { return notImplementedError(s) }
+
+func selectDAGStrategy(backend BackendMode, dagAlloc string) (MemoryStrategy, error) {
+	choice := strings.ToLower(strings.TrimSpace(dagAlloc))
+	if choice == "" {
+		choice = "auto"
+	}
+	if choice == "auto" {
+		switch backend {
+		case BackendCPU:
+			return GoHeapMemory{}, nil
+		case BackendUnified:
+			return GoHeapMemory{}, nil
+		case BackendGPU:
+			return GoHeapMemory{}, nil
+		default:
+			return nil, fmt.Errorf("unsupported backend %q", backend)
+		}
+	}
+	switch choice {
+	case "go", "go-heap":
+		return GoHeapMemory{}, nil
+	case "pinned", "pinned-host":
+		return PinnedMemory{}, nil
+	case "cuda", "cuda-managed":
+		return CUDAManagedMemory{}, nil
+	case "opencl", "opencl-svm", "svm":
+		return OpenCLSVM{}, nil
+	default:
+		return nil, fmt.Errorf("unsupported dag allocation strategy %q (expected one of: auto, go-heap, pinned-host, cuda-managed, opencl-svm)", dagAlloc)
+	}
+}

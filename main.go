@@ -61,18 +61,40 @@ func (s Spec) NodeCount() uint64 {
 }
 
 type DAG struct {
-	spec Spec
-	buf  []byte // contiguous buffer, unified-memory-friendly layout
+	spec      Spec
+	alloc     managedAllocation
+	ownership bool
 }
 
-func NewDAG(spec Spec) (*DAG, error) {
+func NewDAGWithAllocation(spec Spec, alloc managedAllocation, ownership bool) (*DAG, error) {
 	if err := spec.Validate(); err != nil {
 		return nil, err
 	}
-	return &DAG{
-		spec: spec,
-		buf:  make([]byte, spec.DAGSizeBytes),
-	}, nil
+	if alloc == nil {
+		return nil, errors.New("dag allocation cannot be nil")
+	}
+	if uint64(len(alloc.Bytes())) < spec.DAGSizeBytes {
+		if ownership {
+			_ = alloc.Free()
+		}
+		return nil, errors.New("managed allocation is smaller than the DAG")
+	}
+	return &DAG{spec: spec, alloc: alloc, ownership: ownership}, nil
+}
+
+func NewDAGWithStrategy(spec Spec, strategy MemoryStrategy) (*DAG, error) {
+	if strategy == nil {
+		strategy = GoHeapMemory{}
+	}
+	alloc, err := strategy.Alloc(spec.DAGSizeBytes)
+	if err != nil {
+		return nil, err
+	}
+	return NewDAGWithAllocation(spec, alloc, true)
+}
+
+func NewDAG(spec Spec) (*DAG, error) {
+	return NewDAGWithStrategy(spec, GoHeapMemory{})
 }
 
 func (d *DAG) NodeCount() uint64 {
@@ -81,11 +103,29 @@ func (d *DAG) NodeCount() uint64 {
 
 func (d *DAG) Node(i uint64) []byte {
 	off := i * d.spec.NodeSize
-	return d.buf[off : off+d.spec.NodeSize]
+	buf := d.Bytes()
+	return buf[off : off+d.spec.NodeSize]
 }
 
 func (d *DAG) Bytes() []byte {
-	return d.buf
+	if d == nil || d.alloc == nil {
+		return nil
+	}
+	buf := d.alloc.Bytes()
+	if uint64(len(buf)) > d.spec.DAGSizeBytes {
+		buf = buf[:d.spec.DAGSizeBytes]
+	}
+	return buf
+}
+
+func (d *DAG) Close() error {
+	if d == nil || d.alloc == nil || !d.ownership {
+		return nil
+	}
+	err := d.alloc.Free()
+	d.alloc = nil
+	d.ownership = false
+	return err
 }
 
 type Target [32]byte
@@ -179,6 +219,7 @@ func newBackend(mode BackendMode) (HashBackend, error) {
 func main() {
 	var (
 		backendName  = flag.String("backend", string(BackendUnified), "mining backend: unified, cpu, or gpu")
+		dagAlloc     = flag.String("dag-alloc", "auto", "dag allocation strategy: auto, go-heap, pinned-host, cuda-managed, opencl-svm")
 		dagMiB       = flag.Uint64("dag-mib", DefaultDAGMiB, "DAG size in MiB")
 		reads        = flag.Uint64("reads", DefaultReadsPerH, "random DAG reads per hash")
 		workers      = flag.Int("workers", runtime.NumCPU(), "mining worker count")
@@ -234,10 +275,21 @@ func main() {
 	fmt.Printf("workers: %d\n", *workers)
 	fmt.Printf("target: %s\n", target.String())
 
-	dag, err := NewDAG(spec)
+	strategy, err := selectDAGStrategy(mode, *dagAlloc)
 	if err != nil {
 		log.Fatal(err)
 	}
+	fmt.Printf("dag allocation: %s\n", strategy.Name())
+
+	dag, err := NewDAGWithStrategy(spec, strategy)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer func() {
+		if err := dag.Close(); err != nil {
+			log.Printf("warning: dag close failed: %v", err)
+		}
+	}()
 
 	genStart := time.Now()
 	if err := GenerateDAG(dag, epochSeed, *workers); err != nil {
@@ -316,6 +368,9 @@ func GenerateDAG(dag *DAG, epochSeed []byte, workers int) error {
 }
 
 func (m *Miner) Mine(header []byte, target Target, startNonce, maxNonces uint64) (MineResult, bool) {
+	if batchBackend, ok := m.backend.(BatchHashBackend); ok {
+		return m.mineBatch(header, target, startNonce, maxNonces, batchBackend)
+	}
 	start := time.Now()
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -400,14 +455,45 @@ func (m *Miner) Mine(header []byte, target Target, startNonce, maxNonces uint64)
 	}, true
 }
 
+func (m *Miner) mineBatch(header []byte, target Target, startNonce, maxNonces uint64, batchBackend BatchHashBackend) (MineResult, bool) {
+	start := time.Now()
+	if maxNonces == 0 {
+		maxNonces = 100000
+	}
+	results, err := batchBackend.HashBatch(header, startNonce, maxNonces, m.dag)
+	if err != nil {
+		return MineResult{}, false
+	}
+	for i, h := range results {
+		if LessOrEqualBE(h.Pow256, target) {
+			elapsed := time.Since(start)
+			hashes := uint64(i + 1)
+			return MineResult{
+				Nonce:      startNonce + uint64(i),
+				Hashes:     hashes,
+				Elapsed:    elapsed,
+				HashRate:   float64(hashes) / elapsed.Seconds(),
+				Hash256Hex: hex.EncodeToString(h.Pow256[:]),
+				Hash512Hex: hex.EncodeToString(h.Full512[:]),
+				Backend:    m.backend.Mode(),
+			}, true
+		}
+	}
+	return MineResult{}, false
+}
+
 func Benchmark(m *Miner, header []byte, startNonce, maxNonces uint64) {
 	if maxNonces == 0 {
 		maxNonces = 100000
 	}
 
 	start := time.Now()
-	for i := uint64(0); i < maxNonces; i++ {
-		_ = m.backend.Hash(header, startNonce+i, m.dag)
+	if batchBackend, ok := m.backend.(BatchHashBackend); ok {
+		_, _ = batchBackend.HashBatch(header, startNonce, maxNonces, m.dag)
+	} else {
+		for i := uint64(0); i < maxNonces; i++ {
+			_ = m.backend.Hash(header, startNonce+i, m.dag)
+		}
 	}
 	elapsed := time.Since(start)
 
