@@ -36,7 +36,7 @@ func EnsureSeedInput(s *HashScratch, headerLen int) {
 	s.seedInput = s.seedInput[:headerLen+8]
 }
 
-func LatticeHash(header []byte, nonce uint64, accessor DAGAccessor, scratch *HashScratch) HashResult {
+func LatticeHash(spec Spec, header []byte, nonce uint64, accessor DAGAccessor, scratch *HashScratch) HashResult {
 	var out HashResult
 	if accessor == nil || accessor.NodeCount() == 0 {
 		return out
@@ -53,7 +53,7 @@ func LatticeHash(header []byte, nonce uint64, accessor DAGAccessor, scratch *Has
 	copy(mix[:], seed512[:32])
 
 	var node [64]byte
-	for r := uint64(0); r < ReadsPerHash; r++ {
+	for r := uint64(0); r < spec.ReadsPerHash; r++ {
 		copy(scratch.fnvInput[:32], mix[:])
 		binary.LittleEndian.PutUint64(scratch.fnvInput[32:], r)
 

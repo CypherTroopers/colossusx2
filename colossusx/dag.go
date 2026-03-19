@@ -9,6 +9,84 @@ import (
 	"golang.org/x/crypto/sha3"
 )
 
+type Allocation interface {
+	Bytes() []byte
+	Free() error
+	Name() string
+}
+
+type Allocator interface {
+	Alloc(size uint64) (Allocation, error)
+	Name() string
+}
+
+type DAG struct {
+	spec      Spec
+	alloc     Allocation
+	ownership bool
+}
+
+func NewDAGWithAllocation(spec Spec, alloc Allocation, ownership bool) (*DAG, error) {
+	if err := spec.Validate(); err != nil {
+		return nil, err
+	}
+	if alloc == nil {
+		return nil, errors.New("dag allocation cannot be nil")
+	}
+	if uint64(len(alloc.Bytes())) < spec.DAGSizeBytes {
+		if ownership {
+			_ = alloc.Free()
+		}
+		return nil, errors.New("managed allocation is smaller than the DAG")
+	}
+	return &DAG{spec: spec, alloc: alloc, ownership: ownership}, nil
+}
+
+func NewDAGWithAllocator(spec Spec, allocator Allocator) (*DAG, error) {
+	if allocator == nil {
+		return nil, errors.New("dag allocator cannot be nil")
+	}
+	alloc, err := allocator.Alloc(spec.DAGSizeBytes)
+	if err != nil {
+		return nil, err
+	}
+	return NewDAGWithAllocation(spec, alloc, true)
+}
+
+func (d *DAG) Spec() Spec { return d.spec }
+func (d *DAG) AllocationName() string {
+	if d == nil || d.alloc == nil {
+		return ""
+	}
+	return d.alloc.Name()
+}
+func (d *DAG) NodeCount() uint64 { return d.spec.NodeCount() }
+func (d *DAG) Bytes() []byte {
+	if d == nil || d.alloc == nil {
+		return nil
+	}
+	buf := d.alloc.Bytes()
+	if uint64(len(buf)) > d.spec.DAGSizeBytes {
+		buf = buf[:d.spec.DAGSizeBytes]
+	}
+	return buf
+}
+func (d *DAG) Node(i uint64) []byte {
+	off := i * d.spec.NodeSize
+	buf := d.Bytes()
+	return buf[off : off+d.spec.NodeSize]
+}
+func (d *DAG) ReadNode(i uint64, out *[64]byte) { copy(out[:], d.Node(i)) }
+func (d *DAG) Close() error {
+	if d == nil || d.alloc == nil || !d.ownership {
+		return nil
+	}
+	err := d.alloc.Free()
+	d.alloc = nil
+	d.ownership = false
+	return err
+}
+
 func GenerateDAG(spec Spec, dag []byte, epochSeed []byte, workers int) error {
 	if err := spec.Validate(); err != nil {
 		return err
@@ -54,4 +132,11 @@ func GenerateDAG(spec Spec, dag []byte, epochSeed []byte, workers int) error {
 	}
 	wg.Wait()
 	return nil
+}
+
+func PopulateDAG(dag *DAG, epochSeed []byte, workers int) error {
+	if dag == nil {
+		return errors.New("dag cannot be nil")
+	}
+	return GenerateDAG(dag.spec, dag.Bytes(), epochSeed, workers)
 }

@@ -1,6 +1,10 @@
 package main
 
-import "testing"
+import (
+	"testing"
+
+	cx "colossusx/colossusx"
+)
 
 type testAllocation struct {
 	buf   []byte
@@ -12,7 +16,7 @@ func (a *testAllocation) Free() error   { a.freed = true; return nil }
 func (a *testAllocation) Name() string  { return "test-allocation" }
 
 func TestNewDAGWithStrategyGoHeap(t *testing.T) {
-	spec := Spec{DAGSizeBytes: 1024, NodeSize: DefaultNodeSize, ReadsPerHash: 4, EpochBlocks: DefaultEpochBlocks}
+	spec := Spec{Mode: cx.ModeResearch, DAGSizeBytes: 1024, NodeSize: DefaultNodeSize, ReadsPerHash: 4, EpochBlocks: DefaultEpochBlocks}
 	dag, err := NewDAGWithStrategy(spec, GoHeapMemory{})
 	if err != nil {
 		t.Fatalf("NewDAGWithStrategy: %v", err)
@@ -24,7 +28,7 @@ func TestNewDAGWithStrategyGoHeap(t *testing.T) {
 }
 
 func TestUnsupportedStrategyReturnsExplicitError(t *testing.T) {
-	if _, err := NewDAGWithStrategy(Spec{DAGSizeBytes: 1024, NodeSize: DefaultNodeSize, ReadsPerHash: 4, EpochBlocks: DefaultEpochBlocks}, PinnedMemory{}); err == nil {
+	if _, err := NewDAGWithStrategy(Spec{Mode: cx.ModeResearch, DAGSizeBytes: 1024, NodeSize: DefaultNodeSize, ReadsPerHash: 4, EpochBlocks: DefaultEpochBlocks}, PinnedMemory{}); err == nil {
 		t.Fatal("expected unsupported pinned strategy to fail")
 	}
 	if _, err := (CUDAManagedMemory{}).Alloc(64); err == nil {
@@ -37,7 +41,7 @@ func TestUnsupportedStrategyReturnsExplicitError(t *testing.T) {
 
 func TestDAGCloseReleasesOwnedAllocation(t *testing.T) {
 	alloc := &testAllocation{buf: make([]byte, 1024)}
-	dag, err := NewDAGWithAllocation(Spec{DAGSizeBytes: 1024, NodeSize: DefaultNodeSize, ReadsPerHash: 4, EpochBlocks: DefaultEpochBlocks}, alloc, true)
+	dag, err := NewDAGWithAllocation(Spec{Mode: cx.ModeResearch, DAGSizeBytes: 1024, NodeSize: DefaultNodeSize, ReadsPerHash: 4, EpochBlocks: DefaultEpochBlocks}, alloc, true)
 	if err != nil {
 		t.Fatalf("NewDAGWithAllocation: %v", err)
 	}
@@ -64,7 +68,7 @@ func TestSelectDAGStrategy(t *testing.T) {
 
 func TestNewDAGWithAllocationRejectsShortBuffer(t *testing.T) {
 	alloc := &testAllocation{buf: make([]byte, 8)}
-	_, err := NewDAGWithAllocation(Spec{DAGSizeBytes: 1024, NodeSize: DefaultNodeSize, ReadsPerHash: 4, EpochBlocks: DefaultEpochBlocks}, alloc, false)
+	_, err := NewDAGWithAllocation(Spec{Mode: cx.ModeResearch, DAGSizeBytes: 1024, NodeSize: DefaultNodeSize, ReadsPerHash: 4, EpochBlocks: DefaultEpochBlocks}, alloc, false)
 	if err == nil {
 		t.Fatal("expected short allocation to fail")
 	}

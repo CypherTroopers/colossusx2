@@ -1,138 +1,197 @@
 package main
 
 import (
-	"context"
 	"encoding/hex"
 	"flag"
 	"fmt"
 	"log"
-	"math"
 	"os"
 	"runtime"
-	"sync"
-	"sync/atomic"
-	"time"
 
 	cx "colossusx/colossusx"
 )
 
 const (
-	DefaultDAGMiB      = cx.DAGSizeBytes / (1024 * 1024)
-	DefaultReadsPerH   = cx.ReadsPerHash
-	DefaultNodeSize    = cx.NodeSize
-	DefaultEpochBlocks = cx.EpochBlocks
+	DefaultDAGMiB      = cx.StrictDAGSizeBytes / (1024 * 1024)
+	DefaultReadsPerH   = cx.StrictReadsPerHash
+	DefaultNodeSize    = cx.StrictNodeSize
+	DefaultEpochBlocks = cx.StrictEpochBlocks
 )
 
-type BackendMode string
+type BackendMode = cx.BackendMode
 
 const (
-	BackendUnified BackendMode = "unified"
-	BackendCPU     BackendMode = "cpu"
-	BackendGPU     BackendMode = "gpu"
+	BackendUnified = cx.BackendUnified
+	BackendCPU     = cx.BackendCPU
+	BackendGPU     = cx.BackendGPU
 )
 
 type Spec = cx.Spec
 type Target = cx.Target
 type HashResult = cx.HashResult
+type DAG = cx.DAG
+type Miner = cx.Miner
+type MineResult = cx.MineResult
+type HashBackend = cx.HashBackend
 
-type DAG struct {
-	spec      Spec
-	alloc     managedAllocation
-	ownership bool
+type cliConfig struct {
+	mode       cx.Mode
+	backend    BackendMode
+	dagAlloc   string
+	spec       Spec
+	workers    int
+	header     []byte
+	epochSeed  []byte
+	target     Target
+	startNonce uint64
+	maxNonces  uint64
+	benchOnly  bool
 }
 
-func NewDAGWithAllocation(spec Spec, alloc managedAllocation, ownership bool) (*DAG, error) {
-	if err := spec.Validate(); err != nil {
-		return nil, err
-	}
-	if alloc == nil {
-		return nil, fmt.Errorf("dag allocation cannot be nil")
-	}
-	if uint64(len(alloc.Bytes())) < spec.DAGSizeBytes {
-		if ownership {
-			_ = alloc.Free()
-		}
-		return nil, fmt.Errorf("managed allocation is smaller than the DAG")
-	}
-	return &DAG{spec: spec, alloc: alloc, ownership: ownership}, nil
-}
-
-func NewDAGWithStrategy(spec Spec, strategy MemoryStrategy) (*DAG, error) {
-	if strategy == nil {
-		strategy = GoHeapMemory{}
-	}
-	alloc, err := strategy.Alloc(spec.DAGSizeBytes)
+func main() {
+	cfg, err := parseCLIConfig(os.Args[1:])
 	if err != nil {
-		return nil, err
+		log.Fatal(err)
 	}
-	return NewDAGWithAllocation(spec, alloc, true)
+	backend, err := newBackend(cfg.backend)
+	if err != nil {
+		log.Fatal(err)
+	}
+	strategy, err := selectDAGStrategy(cfg.backend, cfg.dagAlloc)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if err := run(cfg, backend, strategy); err != nil {
+		log.Fatal(err)
+	}
 }
 
-func NewDAG(spec Spec) (*DAG, error) { return NewDAGWithStrategy(spec, GoHeapMemory{}) }
-func (d *DAG) NodeCount() uint64     { return d.spec.NodeCount() }
-func (d *DAG) Node(i uint64) []byte {
-	off := i * d.spec.NodeSize
-	buf := d.Bytes()
-	return buf[off : off+d.spec.NodeSize]
+func parseCLIConfig(args []string) (cliConfig, error) {
+	fs := flag.NewFlagSet("colossusx", flag.ContinueOnError)
+	fs.SetOutput(os.Stdout)
+
+	var (
+		modeName     = fs.String("mode", string(cx.ModeStrict), "operating mode: strict or research")
+		backendName  = fs.String("backend", string(BackendUnified), "mining backend: unified, cpu, or gpu")
+		dagAlloc     = fs.String("dag-alloc", "auto", "dag allocation strategy: auto, go-heap, pinned-host, cuda-managed, opencl-svm")
+		dagMiB       = fs.Uint64("dag-mib", DefaultDAGMiB, "DAG size in MiB")
+		reads        = fs.Uint64("reads", DefaultReadsPerH, "random DAG reads per hash")
+		workers      = fs.Int("workers", runtime.NumCPU(), "mining worker count")
+		epochBlocks  = fs.Uint64("epoch-blocks", DefaultEpochBlocks, "blocks per epoch")
+		headerHex    = fs.String("header", "434f4c4f535355532d582d544553542d4845414445522d303031", "header bytes in hex")
+		epochSeedHex = fs.String("epoch-seed", "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff", "epoch seed in hex")
+		targetHex    = fs.String("target", "00ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", "32-byte big-endian target hex")
+		startNonce   = fs.Uint64("start-nonce", 0, "starting nonce")
+		maxNonces    = fs.Uint64("max-nonces", 200000, "0 = unbounded")
+		benchOnly    = fs.Bool("bench", false, "benchmark hash loop only")
+	)
+	if err := fs.Parse(args); err != nil {
+		return cliConfig{}, err
+	}
+
+	mode, err := parseMode(*modeName)
+	if err != nil {
+		return cliConfig{}, err
+	}
+	backend, err := parseBackendMode(*backendName)
+	if err != nil {
+		return cliConfig{}, err
+	}
+	spec := cx.ResearchSpec((*dagMiB)*1024*1024, *reads, *epochBlocks)
+	if mode == cx.ModeStrict {
+		spec = cx.StrictSpec()
+		if (*dagMiB)*1024*1024 != cx.StrictDAGSizeBytes || *reads != cx.StrictReadsPerHash || *epochBlocks != cx.StrictEpochBlocks {
+			return cliConfig{}, fmt.Errorf("strict mode does not allow overriding DAG, reads, or epoch constants")
+		}
+	}
+	if err := spec.Validate(); err != nil {
+		return cliConfig{}, err
+	}
+
+	header, err := hex.DecodeString(*headerHex)
+	if err != nil {
+		return cliConfig{}, fmt.Errorf("invalid header hex: %w", err)
+	}
+	epochSeed, err := hex.DecodeString(*epochSeedHex)
+	if err != nil {
+		return cliConfig{}, fmt.Errorf("invalid epoch-seed hex: %w", err)
+	}
+	target, err := cx.ParseTargetHex(*targetHex)
+	if err != nil {
+		return cliConfig{}, fmt.Errorf("invalid target: %w", err)
+	}
+
+	return cliConfig{mode: mode, backend: backend, dagAlloc: *dagAlloc, spec: spec, workers: *workers, header: header, epochSeed: epochSeed, target: target, startNonce: *startNonce, maxNonces: *maxNonces, benchOnly: *benchOnly}, nil
 }
-func (d *DAG) Bytes() []byte {
-	if d == nil || d.alloc == nil {
+
+func run(cfg cliConfig, backend HashBackend, strategy MemoryStrategy) error {
+	printConfig(cfg, backend, strategy)
+
+	dag, err := cx.NewDAGWithAllocator(cfg.spec, strategy)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err := dag.Close(); err != nil {
+			log.Printf("warning: dag close failed: %v", err)
+		}
+	}()
+
+	if err := cx.PopulateDAG(dag, cfg.epochSeed, cfg.workers); err != nil {
+		return fmt.Errorf("generate dag: %w", err)
+	}
+	fmt.Println("dag generated")
+
+	miner, err := cx.NewMiner(cfg.spec, dag, cfg.workers, backend)
+	if err != nil {
+		return err
+	}
+	if cfg.benchOnly {
+		res := cx.Benchmark(miner, cfg.header, cfg.startNonce, cfg.maxNonces)
+		fmt.Println("benchmark complete")
+		fmt.Printf("backend: %s\n", res.Backend)
+		fmt.Printf("hashes: %d\n", res.Hashes)
+		fmt.Printf("elapsed: %s\n", res.Elapsed)
+		fmt.Printf("hashrate: %.2f H/s\n", res.HashRate)
 		return nil
 	}
-	buf := d.alloc.Bytes()
-	if uint64(len(buf)) > d.spec.DAGSizeBytes {
-		buf = buf[:d.spec.DAGSizeBytes]
-	}
-	return buf
-}
-func (d *DAG) Close() error {
-	if d == nil || d.alloc == nil || !d.ownership {
-		return nil
-	}
-	err := d.alloc.Free()
-	d.alloc = nil
-	d.ownership = false
-	return err
-}
 
-func ParseTargetHex(s string) (Target, error) { return cx.ParseTargetHex(s) }
-func LessOrEqualBE(a [32]byte, b Target) bool { return cx.LessOrEqualBE(a, b) }
-
-type MineResult struct {
-	Nonce      uint64
-	Hashes     uint64
-	Elapsed    time.Duration
-	HashRate   float64
-	Hash256Hex string
-	Hash512Hex string
-	Backend    BackendMode
+	res, ok := miner.Mine(cfg.header, cfg.target, cfg.startNonce, cfg.maxNonces)
+	if !ok {
+		fmt.Println("no solution found in range")
+		return exitCodeError(1)
+	}
+	fmt.Println("solution found")
+	fmt.Printf("nonce: %d\n", res.Nonce)
+	fmt.Printf("hash256: %s\n", res.Hash256Hex)
+	fmt.Printf("hash512: %s\n", res.Hash512Hex)
+	fmt.Printf("elapsed: %s\n", res.Elapsed)
+	fmt.Printf("hashes: %d\n", res.Hashes)
+	fmt.Printf("hashrate: %.2f H/s\n", res.HashRate)
+	return nil
 }
 
-type HashBackend interface {
-	Mode() BackendMode
-	Description() string
-	Prepare(*DAG) error
-	Hash(header []byte, nonce uint64, dag *DAG) HashResult
+func printConfig(cfg cliConfig, backend HashBackend, strategy MemoryStrategy) {
+	fmt.Println("COLOSSUS-X miner")
+	fmt.Printf("mode: %s\n", cfg.mode)
+	fmt.Printf("backend: %s (%s)\n", backend.Mode(), backend.Description())
+	fmt.Printf("dag: %d MiB\n", cfg.spec.DAGSizeBytes/(1024*1024))
+	fmt.Printf("node size: %d bytes\n", cfg.spec.NodeSize)
+	fmt.Printf("node count: %d\n", cfg.spec.NodeCount())
+	fmt.Printf("reads/hash: %d\n", cfg.spec.ReadsPerHash)
+	fmt.Printf("epoch blocks: %d\n", cfg.spec.EpochBlocks)
+	fmt.Printf("workers: %d\n", cfg.workers)
+	fmt.Printf("target: %s\n", cfg.target.String())
+	fmt.Printf("dag allocation: %s\n", strategy.Name())
 }
 
-type Miner struct {
-	spec    Spec
-	dag     *DAG
-	workers int
-	backend HashBackend
-}
-
-func NewMiner(spec Spec, dag *DAG, workers int, backend HashBackend) (*Miner, error) {
-	if workers <= 0 {
-		workers = runtime.NumCPU()
+func parseMode(s string) (cx.Mode, error) {
+	switch cx.Mode(s) {
+	case cx.ModeStrict, cx.ModeResearch:
+		return cx.Mode(s), nil
+	default:
+		return "", fmt.Errorf("unsupported mode %q (expected one of: %s, %s)", s, cx.ModeStrict, cx.ModeResearch)
 	}
-	if backend == nil {
-		backend = &UnifiedBackend{}
-	}
-	if err := backend.Prepare(dag); err != nil {
-		return nil, err
-	}
-	return &Miner{spec: spec, dag: dag, workers: workers, backend: backend}, nil
 }
 
 func parseBackendMode(s string) (BackendMode, error) {
@@ -157,253 +216,6 @@ func newBackend(mode BackendMode) (HashBackend, error) {
 	}
 }
 
-func main() {
-	defaultSpec := cx.DefaultSpec()
-	var (
-		backendName  = flag.String("backend", string(BackendUnified), "mining backend: unified, cpu, or gpu")
-		dagAlloc     = flag.String("dag-alloc", "auto", "dag allocation strategy: auto, go-heap, pinned-host, cuda-managed, opencl-svm")
-		dagMiB       = flag.Uint64("dag-mib", DefaultDAGMiB, "DAG size in MiB")
-		reads        = flag.Uint64("reads", cx.ReadsPerHash, "random DAG reads per hash")
-		workers      = flag.Int("workers", runtime.NumCPU(), "mining worker count")
-		epochBlocks  = flag.Uint64("epoch-blocks", cx.EpochBlocks, "blocks per epoch")
-		headerHex    = flag.String("header", "434f4c4f535355532d582d544553542d4845414445522d303031", "header bytes in hex")
-		epochSeedHex = flag.String("epoch-seed", "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff", "epoch seed in hex")
-		targetHex    = flag.String("target", "00ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", "32-byte big-endian target hex")
-		startNonce   = flag.Uint64("start-nonce", 0, "starting nonce")
-		maxNonces    = flag.Uint64("max-nonces", 200000, "0 = unbounded")
-		benchOnly    = flag.Bool("bench", false, "benchmark hash loop only")
-	)
-	flag.Parse()
+type exitCodeError int
 
-	mode, err := parseBackendMode(*backendName)
-	if err != nil {
-		log.Fatal(err)
-	}
-	backend, err := newBackend(mode)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	spec := defaultSpec
-	spec.DAGSizeBytes = (*dagMiB) * 1024 * 1024
-	spec.ReadsPerHash = *reads
-	spec.EpochBlocks = *epochBlocks
-	if err := spec.Validate(); err != nil {
-		log.Fatal(err)
-	}
-
-	header, err := hex.DecodeString(*headerHex)
-	if err != nil {
-		log.Fatalf("invalid header hex: %v", err)
-	}
-	epochSeed, err := hex.DecodeString(*epochSeedHex)
-	if err != nil {
-		log.Fatalf("invalid epoch-seed hex: %v", err)
-	}
-	target, err := ParseTargetHex(*targetHex)
-	if err != nil {
-		log.Fatalf("invalid target: %v", err)
-	}
-
-	fmt.Println("COLOSSUS-X miner")
-	if spec.IsSpecLocked() {
-		fmt.Println("mode: spec-locked COLOSSUS-X core")
-	} else {
-		fmt.Println("mode: research compatibility")
-	}
-	fmt.Printf("backend: %s (%s)\n", backend.Mode(), backend.Description())
-	fmt.Printf("dag: %d MiB\n", spec.DAGSizeBytes/(1024*1024))
-	fmt.Printf("node size: %d bytes\n", spec.NodeSize)
-	fmt.Printf("node count: %d\n", spec.NodeCount())
-	fmt.Printf("reads/hash: %d\n", spec.ReadsPerHash)
-	fmt.Printf("epoch blocks: %d\n", spec.EpochBlocks)
-	fmt.Printf("workers: %d\n", *workers)
-	fmt.Printf("target: %s\n", target.String())
-
-	strategy, err := selectDAGStrategy(mode, *dagAlloc)
-	if err != nil {
-		log.Fatal(err)
-	}
-	fmt.Printf("dag allocation: %s\n", strategy.Name())
-
-	dag, err := NewDAGWithStrategy(spec, strategy)
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer func() {
-		if err := dag.Close(); err != nil {
-			log.Printf("warning: dag close failed: %v", err)
-		}
-	}()
-
-	genStart := time.Now()
-	if err := GenerateDAG(dag, epochSeed, *workers); err != nil {
-		log.Fatalf("generate dag: %v", err)
-	}
-	fmt.Printf("dag generated in %s\n", time.Since(genStart).Round(time.Millisecond))
-
-	miner, err := NewMiner(spec, dag, *workers, backend)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	if *benchOnly {
-		Benchmark(miner, header, *startNonce, *maxNonces)
-		return
-	}
-
-	res, ok := miner.Mine(header, target, *startNonce, *maxNonces)
-	if !ok {
-		fmt.Println("no solution found in range")
-		os.Exit(1)
-	}
-
-	fmt.Println("solution found")
-	fmt.Printf("nonce: %d\n", res.Nonce)
-	fmt.Printf("hash256: %s\n", res.Hash256Hex)
-	fmt.Printf("hash512: %s\n", res.Hash512Hex)
-	fmt.Printf("elapsed: %s\n", res.Elapsed.Round(time.Millisecond))
-	fmt.Printf("hashes: %d\n", res.Hashes)
-	fmt.Printf("hashrate: %.2f H/s\n", res.HashRate)
-}
-
-func GenerateDAG(dag *DAG, epochSeed []byte, workers int) error {
-	return cx.GenerateDAG(dag.spec, dag.Bytes(), epochSeed, workers)
-}
-
-func (m *Miner) Mine(header []byte, target Target, startNonce, maxNonces uint64) (MineResult, bool) {
-	if batchBackend, ok := m.backend.(BatchHashBackend); ok {
-		return m.mineBatch(header, target, startNonce, maxNonces, batchBackend)
-	}
-	start := time.Now()
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	var totalHashes atomic.Uint64
-	var found atomic.Bool
-
-	type foundMsg struct {
-		nonce uint64
-		hash  HashResult
-	}
-	resultCh := make(chan foundMsg, 1)
-
-	var wg sync.WaitGroup
-
-	for wid := 0; wid < m.workers; wid++ {
-		wg.Add(1)
-
-		go func(workerID int) {
-			defer wg.Done()
-
-			step := uint64(m.workers)
-			nonce := startNonce + uint64(workerID)
-
-			for {
-				if ctx.Err() != nil || found.Load() {
-					return
-				}
-
-				if maxNonces > 0 {
-					offset := nonce - startNonce
-					if offset >= maxNonces {
-						return
-					}
-				}
-
-				h := m.backend.Hash(header, nonce, m.dag)
-				totalHashes.Add(1)
-
-				if LessOrEqualBE(h.Pow256, target) {
-					if found.CompareAndSwap(false, true) {
-						resultCh <- foundMsg{nonce: nonce, hash: h}
-						cancel()
-					}
-					return
-				}
-
-				if math.MaxUint64-nonce < step {
-					return
-				}
-				nonce += step
-			}
-		}(wid)
-	}
-
-	go func() {
-		wg.Wait()
-		close(resultCh)
-	}()
-
-	msg, ok := <-resultCh
-	if !ok {
-		return MineResult{}, false
-	}
-
-	elapsed := time.Since(start)
-	hashes := totalHashes.Load()
-	var hashrate float64
-	if elapsed > 0 {
-		hashrate = float64(hashes) / elapsed.Seconds()
-	}
-
-	return MineResult{
-		Nonce:      msg.nonce,
-		Hashes:     hashes,
-		Elapsed:    elapsed,
-		HashRate:   hashrate,
-		Hash256Hex: hex.EncodeToString(msg.hash.Pow256[:]),
-		Hash512Hex: hex.EncodeToString(msg.hash.Full512[:]),
-		Backend:    m.backend.Mode(),
-	}, true
-}
-
-func (m *Miner) mineBatch(header []byte, target Target, startNonce, maxNonces uint64, batchBackend BatchHashBackend) (MineResult, bool) {
-	start := time.Now()
-	if maxNonces == 0 {
-		maxNonces = 100000
-	}
-	results, err := batchBackend.HashBatch(header, startNonce, maxNonces, m.dag)
-	if err != nil {
-		return MineResult{}, false
-	}
-	for i, h := range results {
-		if LessOrEqualBE(h.Pow256, target) {
-			elapsed := time.Since(start)
-			hashes := uint64(i + 1)
-			return MineResult{
-				Nonce:      startNonce + uint64(i),
-				Hashes:     hashes,
-				Elapsed:    elapsed,
-				HashRate:   float64(hashes) / elapsed.Seconds(),
-				Hash256Hex: hex.EncodeToString(h.Pow256[:]),
-				Hash512Hex: hex.EncodeToString(h.Full512[:]),
-				Backend:    m.backend.Mode(),
-			}, true
-		}
-	}
-	return MineResult{}, false
-}
-
-func Benchmark(m *Miner, header []byte, startNonce, maxNonces uint64) {
-	if maxNonces == 0 {
-		maxNonces = 100000
-	}
-
-	start := time.Now()
-	if batchBackend, ok := m.backend.(BatchHashBackend); ok {
-		_, _ = batchBackend.HashBatch(header, startNonce, maxNonces, m.dag)
-	} else {
-		for i := uint64(0); i < maxNonces; i++ {
-			_ = m.backend.Hash(header, startNonce+i, m.dag)
-		}
-	}
-	elapsed := time.Since(start)
-
-	fmt.Println("benchmark complete")
-	fmt.Printf("backend: %s\n", m.backend.Mode())
-	fmt.Printf("hashes: %d\n", maxNonces)
-	fmt.Printf("elapsed: %s\n", elapsed.Round(time.Millisecond))
-	fmt.Printf("hashrate: %.2f H/s\n", float64(maxNonces)/elapsed.Seconds())
-}
+func (e exitCodeError) Error() string { return fmt.Sprintf("exit code %d", int(e)) }
