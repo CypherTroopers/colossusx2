@@ -1,5 +1,7 @@
 package main
 
+import cx "colossusx/colossusx"
+
 type cpuNode [64]byte
 
 type cpuDAGView struct{ nodes []cpuNode }
@@ -32,7 +34,7 @@ func (b *CPUBackend) Prepare(dag *DAG) error {
 	}
 	return nil
 }
-func (b *CPUBackend) Hash(header []byte, nonce uint64, dag *DAG) HashResult {
+func (b *CPUBackend) Hash(header []byte, nonce cx.Nonce, dag *DAG) HashResult {
 	if len(b.nodes) == 0 && dag != nil {
 		_ = b.Prepare(dag)
 	}
@@ -41,10 +43,14 @@ func (b *CPUBackend) Hash(header []byte, nonce uint64, dag *DAG) HashResult {
 	return latticeHashWithAccessor(b.spec, header, nonce, cpuDAGView{nodes: b.nodes}, s)
 }
 
-func (b *CPUBackend) HashBatch(header []byte, startNonce uint64, count uint64, dag *DAG) ([]HashResult, error) {
+func (b *CPUBackend) HashBatch(header []byte, startNonce cx.Nonce, count uint64, dag *DAG) ([]HashResult, error) {
 	results := make([]HashResult, count)
 	for i := uint64(0); i < count; i++ {
-		results[i] = b.Hash(header, startNonce+i, dag)
+		nonce, ok := startNonce.AddUint64(i)
+		if !ok {
+			return results[:i], nil
+		}
+		results[i] = b.Hash(header, nonce, dag)
 	}
 	return results, nil
 }

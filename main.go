@@ -147,7 +147,7 @@ func run(cfg cliConfig, backend HashBackend, strategy MemoryStrategy) error {
 		return err
 	}
 	if cfg.benchOnly {
-		res := cx.Benchmark(miner, cfg.header, cfg.startNonce, cfg.maxNonces)
+		res := cx.Benchmark(miner, cfg.header, cx.NewUint64Nonce(cfg.startNonce), cfg.maxNonces)
 		fmt.Println("benchmark complete")
 		fmt.Printf("backend: %s\n", res.Backend)
 		fmt.Printf("hashes: %d\n", res.Hashes)
@@ -156,13 +156,13 @@ func run(cfg cliConfig, backend HashBackend, strategy MemoryStrategy) error {
 		return nil
 	}
 
-	res, ok := miner.Mine(cfg.header, cfg.target, cfg.startNonce, cfg.maxNonces)
+	res, ok := miner.Mine(cfg.header, cfg.target, cx.NewUint64Nonce(cfg.startNonce), cfg.maxNonces)
 	if !ok {
 		fmt.Println("no solution found in range")
 		return exitCodeError(1)
 	}
 	fmt.Println("solution found")
-	fmt.Printf("nonce: %d\n", res.Nonce)
+	fmt.Printf("nonce: %s\n", res.Nonce.String())
 	fmt.Printf("hash256: %s\n", res.Hash256Hex)
 	fmt.Printf("hash512: %s\n", res.Hash512Hex)
 	fmt.Printf("elapsed: %s\n", res.Elapsed)

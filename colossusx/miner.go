@@ -3,7 +3,6 @@ package colossusx
 import (
 	"context"
 	"encoding/hex"
-	"math"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -22,15 +21,15 @@ type HashBackend interface {
 	Mode() BackendMode
 	Description() string
 	Prepare(*DAG) error
-	Hash(header []byte, nonce uint64, dag *DAG) HashResult
+	Hash(header []byte, nonce Nonce, dag *DAG) HashResult
 }
 
 type BatchHashBackend interface {
-	HashBatch(header []byte, startNonce uint64, count uint64, dag *DAG) ([]HashResult, error)
+	HashBatch(header []byte, startNonce Nonce, count uint64, dag *DAG) ([]HashResult, error)
 }
 
 type MineResult struct {
-	Nonce      uint64
+	Nonce      Nonce
 	Hashes     uint64
 	Elapsed    time.Duration
 	HashRate   float64
@@ -59,7 +58,7 @@ func NewMiner(spec Spec, dag *DAG, workers int, backend HashBackend) (*Miner, er
 	return &Miner{spec: spec, dag: dag, workers: workers, backend: backend}, nil
 }
 
-func (m *Miner) Mine(header []byte, target Target, startNonce, maxNonces uint64) (MineResult, bool) {
+func (m *Miner) Mine(header []byte, target Target, startNonce Nonce, maxNonces uint64) (MineResult, bool) {
 	if batchBackend, ok := m.backend.(BatchHashBackend); ok {
 		return m.mineBatch(header, target, startNonce, maxNonces, batchBackend)
 	}
@@ -72,7 +71,7 @@ func (m *Miner) Mine(header []byte, target Target, startNonce, maxNonces uint64)
 	var found atomic.Bool
 
 	type foundMsg struct {
-		nonce uint64
+		nonce Nonce
 		hash  HashResult
 	}
 	resultCh := make(chan foundMsg, 1)
@@ -83,15 +82,25 @@ func (m *Miner) Mine(header []byte, target Target, startNonce, maxNonces uint64)
 		go func(workerID int) {
 			defer wg.Done()
 			step := uint64(m.workers)
-			nonce := startNonce + uint64(workerID)
+			nonce, ok := startNonce.AddUint64(uint64(workerID))
+			if !ok {
+				return
+			}
 			for {
 				if ctx.Err() != nil || found.Load() {
 					return
 				}
 				if maxNonces > 0 {
-					offset := nonce - startNonce
-					if offset >= maxNonces {
-						return
+					// Current bounded-range mining remains uint64-backed. The Nonce
+					// abstraction lets hashing/backends move beyond uint64 later without
+					// rewriting the core loop shape.
+					if start64, ok := startNonce.(Uint64Nonce); ok {
+						if nonce64, ok := nonce.(Uint64Nonce); ok {
+							offset := uint64(nonce64) - uint64(start64)
+							if offset >= maxNonces {
+								return
+							}
+						}
 					}
 				}
 				h := m.backend.Hash(header, nonce, m.dag)
@@ -103,10 +112,11 @@ func (m *Miner) Mine(header []byte, target Target, startNonce, maxNonces uint64)
 					}
 					return
 				}
-				if math.MaxUint64-nonce < step {
+				next, ok := nonce.AddUint64(step)
+				if !ok {
 					return
 				}
-				nonce += step
+				nonce = next
 			}
 		}(wid)
 	}
@@ -138,7 +148,7 @@ func (m *Miner) Mine(header []byte, target Target, startNonce, maxNonces uint64)
 	}, true
 }
 
-func (m *Miner) mineBatch(header []byte, target Target, startNonce, maxNonces uint64, batchBackend BatchHashBackend) (MineResult, bool) {
+func (m *Miner) mineBatch(header []byte, target Target, startNonce Nonce, maxNonces uint64, batchBackend BatchHashBackend) (MineResult, bool) {
 	start := time.Now()
 	if maxNonces == 0 {
 		maxNonces = 100000
@@ -151,8 +161,9 @@ func (m *Miner) mineBatch(header []byte, target Target, startNonce, maxNonces ui
 		if LessOrEqualBE(h.Pow256, target) {
 			elapsed := time.Since(start)
 			hashes := uint64(i + 1)
+			nonce, _ := startNonce.AddUint64(uint64(i))
 			return MineResult{
-				Nonce:      startNonce + uint64(i),
+				Nonce:      nonce,
 				Hashes:     hashes,
 				Elapsed:    elapsed,
 				HashRate:   float64(hashes) / elapsed.Seconds(),
@@ -165,7 +176,7 @@ func (m *Miner) mineBatch(header []byte, target Target, startNonce, maxNonces ui
 	return MineResult{}, false
 }
 
-func Benchmark(m *Miner, header []byte, startNonce, maxNonces uint64) MineResult {
+func Benchmark(m *Miner, header []byte, startNonce Nonce, maxNonces uint64) MineResult {
 	if maxNonces == 0 {
 		maxNonces = 100000
 	}
@@ -174,7 +185,11 @@ func Benchmark(m *Miner, header []byte, startNonce, maxNonces uint64) MineResult
 		_, _ = batchBackend.HashBatch(header, startNonce, maxNonces, m.dag)
 	} else {
 		for i := uint64(0); i < maxNonces; i++ {
-			_ = m.backend.Hash(header, startNonce+i, m.dag)
+			nonce, ok := startNonce.AddUint64(i)
+			if !ok {
+				break
+			}
+			_ = m.backend.Hash(header, nonce, m.dag)
 		}
 	}
 	elapsed := time.Since(start)

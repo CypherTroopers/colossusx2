@@ -5,8 +5,6 @@ import (
 	"errors"
 	"runtime"
 	"sync"
-
-	"golang.org/x/crypto/sha3"
 )
 
 type Allocation interface {
@@ -124,7 +122,7 @@ func GenerateDAG(spec Spec, dag []byte, epochSeed []byte, workers int) error {
 			copy(tmp, epochSeed)
 			for i := from; i < to; i++ {
 				binary.LittleEndian.PutUint64(tmp[len(epochSeed):], i)
-				sum := sha3.Sum512(tmp)
+				sum := keccak512(tmp)
 				off := i * spec.NodeSize
 				copy(dag[off:off+spec.NodeSize], sum[:])
 			}

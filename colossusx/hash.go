@@ -25,18 +25,26 @@ type HashScratch struct {
 }
 
 func NewHashScratch(headerLen int) *HashScratch {
-	return &HashScratch{seedInput: make([]byte, headerLen+8)}
+	return &HashScratch{seedInput: make([]byte, 0, headerLen+8)}
 }
 
-func EnsureSeedInput(s *HashScratch, headerLen int) {
-	if cap(s.seedInput) < headerLen+8 {
-		s.seedInput = make([]byte, headerLen+8)
+func EnsureSeedInput(s *HashScratch, headerLen int, nonce Nonce) {
+	need := headerLen + 8
+	if nonce != nil {
+		buf := make([]byte, 0, headerLen+32)
+		buf = nonce.AppendTo(buf)
+		if len(buf)+headerLen > need {
+			need = headerLen + len(buf)
+		}
+	}
+	if cap(s.seedInput) < need {
+		s.seedInput = make([]byte, 0, need)
 		return
 	}
-	s.seedInput = s.seedInput[:headerLen+8]
+	s.seedInput = s.seedInput[:0]
 }
 
-func LatticeHash(spec Spec, header []byte, nonce uint64, accessor DAGAccessor, scratch *HashScratch) HashResult {
+func LatticeHash(spec Spec, header []byte, nonce Nonce, accessor DAGAccessor, scratch *HashScratch) HashResult {
 	var out HashResult
 	if accessor == nil || accessor.NodeCount() == 0 {
 		return out
@@ -44,9 +52,11 @@ func LatticeHash(spec Spec, header []byte, nonce uint64, accessor DAGAccessor, s
 	if scratch == nil {
 		scratch = NewHashScratch(len(header))
 	}
-	EnsureSeedInput(scratch, len(header))
-	copy(scratch.seedInput, header)
-	binary.LittleEndian.PutUint64(scratch.seedInput[len(header):], nonce)
+	EnsureSeedInput(scratch, len(header), nonce)
+	scratch.seedInput = append(scratch.seedInput, header...)
+	if nonce != nil {
+		scratch.seedInput = nonce.AppendTo(scratch.seedInput)
+	}
 	seed512 := sha3.Sum512(scratch.seedInput)
 
 	var mix [32]byte
@@ -60,10 +70,7 @@ func LatticeHash(spec Spec, header []byte, nonce uint64, accessor DAGAccessor, s
 		nodeIdx := fnv1a64(scratch.fnvInput[:]) % accessor.NodeCount()
 		accessor.ReadNode(nodeIdx, &node)
 
-		for i := 0; i < 32; i++ {
-			scratch.blakeInput[i] = mix[i] ^ node[i]
-			scratch.blakeInput[32+i] = mix[i] ^ node[32+i]
-		}
+		scratch.blakeInput = blake3RoundInput(mix, node)
 
 		sum := blake3.Sum256(scratch.blakeInput[:])
 		copy(mix[:], sum[:])
@@ -75,6 +82,17 @@ func LatticeHash(spec Spec, header []byte, nonce uint64, accessor DAGAccessor, s
 	copy(out.Full512[:], final512[:])
 	copy(out.Pow256[:], final512[:32])
 	return out
+}
+
+// The Blake3 round input is a deterministic 64-byte buffer formed by XORing
+// the 32-byte mix against each 32-byte half of the 64-byte DAG node.
+func blake3RoundInput(mix [32]byte, node [64]byte) [64]byte {
+	var in [64]byte
+	for i := 0; i < 32; i++ {
+		in[i] = mix[i] ^ node[i]
+		in[32+i] = mix[i] ^ node[32+i]
+	}
+	return in
 }
 
 func fnv1a64(data []byte) uint64 {

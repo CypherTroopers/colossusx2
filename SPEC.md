@@ -62,7 +62,7 @@ The algorithm uses a massive **Directed Acyclic Graph (DAG)** that cannot be pra
 
 **Parameters**
 - Hash Functions: **SHA3-512 + Blake3**
-- Nonce Width: **256-bit**
+- Nonce Width: **256-bit target design**
 - Output: **512-bit digest**
 - Difficulty Model: **Adaptive, 120-second blocks**
 
@@ -70,7 +70,7 @@ The algorithm uses a massive **Directed Acyclic Graph (DAG)** that cannot be pra
 - SHA3-512 provides strong cryptographic mixing and final compression.
 - Blake3 is used in the iterative mix-update path to exploit efficient parallel-friendly hashing behavior.
 - DAG access is interleaved with the hash rounds so memory operations and hash mixing are tightly coupled.
-- A 256-bit nonce space provides a very large search domain.
+- The design target is a 256-bit nonce space; implementations may stage migration work through narrower internal nonce types so long as the hashing boundary is abstracted for a later 256-bit upgrade.
 
 ---
 
@@ -143,3 +143,32 @@ CONST DAG_SIZE     = 80 * 1024^3
 CONST NODE_SIZE    = 64
 CONST READS_PER_H  = 512
 CONST EPOCH_BLOCKS = 8000
+```
+
+## Normative Algorithm
+
+### DAG Generation
+
+For node index `i`, using `i` encoded as an unsigned 64-bit little-endian integer in the current implementation profile:
+
+```text
+dag[i] = keccak512(epoch_seed ++ i)
+```
+
+### LatticeHash
+
+```text
+seed = sha3_512(header ++ nonce_bytes)
+mix  = seed[0:32]
+for round in 0..READS_PER_H-1:
+    node_idx = fnv1a64(mix ++ le64(round)) mod NODE_COUNT
+    node     = dag[node_idx]                  // 64 bytes
+    blake_in = (mix XOR node[0:32]) ++ (mix XOR node[32:64])
+    mix      = blake3_256(blake_in)           // 32 bytes
+result = sha3_512(seed ++ mix)
+```
+
+`mix` is always 32 bytes. `node` is always 64 bytes. The Blake3 round input is therefore the deterministic 64-byte concatenation of the mix XORed with each 32-byte half of the node.
+
+The current codebase introduces a nonce abstraction at the hashing boundary to make a later 256-bit nonce upgrade straightforward, but the active mining loop still steps through a uint64-backed nonce range today.
+

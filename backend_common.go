@@ -12,9 +12,9 @@ var ErrNilDAG = errors.New("backend requires a dag")
 type hashScratch = cx.HashScratch
 
 func newHashScratch(headerLen int) *hashScratch     { return cx.NewHashScratch(headerLen) }
-func ensureSeedInput(s *hashScratch, headerLen int) { cx.EnsureSeedInput(s, headerLen) }
+func ensureSeedInput(s *hashScratch, headerLen int) { cx.EnsureSeedInput(s, headerLen, nil) }
 
-func latticeHashWithAccessor(spec Spec, header []byte, nonce uint64, accessor cx.DAGAccessor, scratch *hashScratch) HashResult {
+func latticeHashWithAccessor(spec Spec, header []byte, nonce cx.Nonce, accessor cx.DAGAccessor, scratch *hashScratch) HashResult {
 	return cx.LatticeHash(spec, header, nonce, accessor, scratch)
 }
 
