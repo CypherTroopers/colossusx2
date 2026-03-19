@@ -1,4 +1,4 @@
-`colossusx` is a minimal COLOSSUS-X research miner written in Go. It runs as a single binary, generates its DAG at startup, and then executes either a benchmark or a mining loop across selectable `unified`, `cpu`, and `gpu` backends.
+`colossusx` is a minimal COLOSSUS-X research miner written in Go. It runs as a single binary, generates its DAG at startup, and then executes either a benchmark or a mining loop across selectable `unified memory`, `cpu`, and `gpu` miner backends.
 
 This README was written by inspecting the current codebase so that a new user can go from a fresh environment to a verified local run.
 
@@ -69,7 +69,7 @@ go run . -h
 Main flags:
 
 - `-bench`: run the hash-loop benchmark only
-- `-backend`: select `unified`, `cpu`, or `gpu` mining backend
+- `-backend`: select `unified`, `cpu`, or `gpu` miner backend
 - `-dag-mib`: DAG size in MiB
 - `-reads`: random DAG reads per hash
 - `-workers`: worker count
@@ -85,11 +85,11 @@ Main flags:
 
 The binary now exposes three backend modes:
 
-- `-backend unified`: the original unified-memory-oriented contiguous DAG layout and CPU hash path
-- `-backend cpu`: explicit CPU mining mode using the same DAG and hash function
-- `-backend gpu`: available in `-tags opencl` builds with a dedicated OpenCL kernel contract, batched launch configuration, and a CPU-verified execution fallback; the default build still returns a clear error when OpenCL support is not compiled in
+- `-backend unified`: unified memory miner mode, which keeps the DAG in one contiguous shared buffer intended for CPU/GPU shared-memory access
+- `-backend cpu`: CPU miner mode, which prepares a dedicated CPU-side node table for repeated hashing
+- `-backend gpu`: GPU miner mode, available in `-tags opencl` builds with a dedicated OpenCL kernel contract, batched launch configuration, and a CPU-verified execution fallback; the default build still returns a clear error when OpenCL support is not compiled in
 
-`unified` now keeps the contiguous unified-memory layout, `cpu` prepares its own node table for repeated hashing, and `gpu` exposes a dedicated OpenCL kernel path in OpenCL-enabled builds.
+`unified` is the unified memory miner: it keeps the DAG in a contiguous shared buffer so CPU-side hashing works against the same memory layout intended for GPU sharing. `cpu` is the dedicated CPU miner and copies the DAG into its own prepared node table. `gpu` is the dedicated GPU miner and exposes the OpenCL kernel path in OpenCL-enabled builds.
 
 ## Fastest verified local run
 

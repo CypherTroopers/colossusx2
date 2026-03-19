@@ -17,7 +17,7 @@ type GPUBackend struct {
 
 func (b *GPUBackend) Mode() BackendMode { return BackendGPU }
 func (b *GPUBackend) Description() string {
-	return "gpu backend with a dedicated OpenCL kernel contract and CPU-verified fallback executor"
+	return "gpu miner with a dedicated OpenCL kernel contract and CPU-verified fallback executor"
 }
 func (b *GPUBackend) Prepare(dag *DAG) error {
 	if b.config.WorkgroupSize == 0 {
