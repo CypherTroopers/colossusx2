@@ -26,6 +26,14 @@ const (
 	DefaultEpochBlocks = 8000
 )
 
+type BackendMode string
+
+const (
+	BackendUnified BackendMode = "unified"
+	BackendCPU     BackendMode = "cpu"
+	BackendGPU     BackendMode = "gpu"
+)
+
 type Spec struct {
 	DAGSizeBytes uint64
 	NodeSize     uint64
@@ -101,38 +109,99 @@ func (t Target) String() string {
 }
 
 type HashResult struct {
-	Pow256 [32]byte
+	Pow256  [32]byte
 	Full512 [64]byte
 }
 
 type MineResult struct {
-	Nonce       uint64
-	Hashes      uint64
-	Elapsed     time.Duration
-	HashRate    float64
-	Hash256Hex  string
-	Hash512Hex  string
+	Nonce      uint64
+	Hashes     uint64
+	Elapsed    time.Duration
+	HashRate   float64
+	Hash256Hex string
+	Hash512Hex string
+	Backend    BackendMode
+}
+
+type HashBackend interface {
+	Mode() BackendMode
+	Description() string
+	Prepare(*DAG) error
+	Hash(header []byte, nonce uint64, dag *DAG) HashResult
+}
+
+type UnifiedBackend struct{}
+
+func (UnifiedBackend) Mode() BackendMode { return BackendUnified }
+func (UnifiedBackend) Description() string {
+	return "unified memory backend using a contiguous DAG buffer"
+}
+func (UnifiedBackend) Prepare(*DAG) error { return nil }
+func (UnifiedBackend) Hash(header []byte, nonce uint64, dag *DAG) HashResult {
+	return LatticeHash(header, nonce, dag)
+}
+
+type CPUBackend struct{}
+
+func (CPUBackend) Mode() BackendMode { return BackendCPU }
+func (CPUBackend) Description() string {
+	return "cpu backend using the same DAG layout and CPU hashing path"
+}
+func (CPUBackend) Prepare(*DAG) error { return nil }
+func (CPUBackend) Hash(header []byte, nonce uint64, dag *DAG) HashResult {
+	return LatticeHash(header, nonce, dag)
 }
 
 type Miner struct {
 	spec    Spec
 	dag     *DAG
 	workers int
+	backend HashBackend
 }
 
-func NewMiner(spec Spec, dag *DAG, workers int) *Miner {
+func NewMiner(spec Spec, dag *DAG, workers int, backend HashBackend) (*Miner, error) {
 	if workers <= 0 {
 		workers = runtime.NumCPU()
+	}
+	if backend == nil {
+		backend = UnifiedBackend{}
+	}
+	if err := backend.Prepare(dag); err != nil {
+		return nil, err
 	}
 	return &Miner{
 		spec:    spec,
 		dag:     dag,
 		workers: workers,
+		backend: backend,
+	}, nil
+}
+
+func parseBackendMode(s string) (BackendMode, error) {
+	switch BackendMode(s) {
+	case BackendUnified, BackendCPU, BackendGPU:
+		return BackendMode(s), nil
+	default:
+		return "", fmt.Errorf("unsupported backend %q (expected one of: %s, %s, %s)", s, BackendUnified, BackendCPU, BackendGPU)
+	}
+}
+
+func newBackend(mode BackendMode) (HashBackend, error) {
+	switch mode {
+	case BackendUnified:
+		return UnifiedBackend{}, nil
+	case BackendCPU:
+		return CPUBackend{}, nil
+	case BackendGPU:
+		return NewGPUBackend()
+	default:
+		return nil, fmt.Errorf("unsupported backend %q", mode)
 	}
 }
 
 func main() {
 	var (
+		backendName  = flag.String("backend", string(BackendUnified), "mining backend: unified, cpu, or gpu")
 		dagMiB       = flag.Uint64("dag-mib", DefaultDAGMiB, "DAG size in MiB")
 		reads        = flag.Uint64("reads", DefaultReadsPerH, "random DAG reads per hash")
 		workers      = flag.Int("workers", runtime.NumCPU(), "mining worker count")
@@ -145,6 +214,15 @@ func main() {
 		benchOnly    = flag.Bool("bench", false, "benchmark hash loop only")
 	)
 	flag.Parse()
+
+	mode, err := parseBackendMode(*backendName)
+	if err != nil {
+		log.Fatal(err)
+	}
+	backend, err := newBackend(mode)
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	spec := Spec{
 		DAGSizeBytes: (*dagMiB) * 1024 * 1024,
@@ -169,7 +247,8 @@ func main() {
 		log.Fatalf("invalid target: %v", err)
 	}
 
-	fmt.Println("COLOSSUS-X research miner (unified-memory-oriented layout)")
+	fmt.Println("COLOSSUS-X research miner")
+	fmt.Printf("backend: %s (%s)\n", backend.Mode(), backend.Description())
 	fmt.Printf("dag: %d MiB\n", spec.DAGSizeBytes/(1024*1024))
 	fmt.Printf("node size: %d bytes\n", spec.NodeSize)
 	fmt.Printf("node count: %d\n", spec.NodeCount())
@@ -189,7 +268,10 @@ func main() {
 	}
 	fmt.Printf("dag generated in %s\n", time.Since(genStart).Round(time.Millisecond))
 
-	miner := NewMiner(spec, dag, *workers)
+	miner, err := NewMiner(spec, dag, *workers, backend)
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	if *benchOnly {
 		Benchmark(miner, header, *startNonce, *maxNonces)
@@ -294,7 +376,7 @@ func (m *Miner) Mine(header []byte, target Target, startNonce, maxNonces uint64)
 					}
 				}
 
-				h := LatticeHash(header, nonce, m.dag)
+				h := m.backend.Hash(header, nonce, m.dag)
 				totalHashes.Add(1)
 
 				if LessOrEqualBE(h.Pow256, target) {
@@ -337,6 +419,7 @@ func (m *Miner) Mine(header []byte, target Target, startNonce, maxNonces uint64)
 		HashRate:   hashrate,
 		Hash256Hex: hex.EncodeToString(msg.hash.Pow256[:]),
 		Hash512Hex: hex.EncodeToString(msg.hash.Full512[:]),
+		Backend:    m.backend.Mode(),
 	}, true
 }
 
@@ -347,11 +430,12 @@ func Benchmark(m *Miner, header []byte, startNonce, maxNonces uint64) {
 
 	start := time.Now()
 	for i := uint64(0); i < maxNonces; i++ {
-		_ = LatticeHash(header, startNonce+i, m.dag)
+		_ = m.backend.Hash(header, startNonce+i, m.dag)
 	}
 	elapsed := time.Since(start)
 
 	fmt.Println("benchmark complete")
+	fmt.Printf("backend: %s\n", m.backend.Mode())
 	fmt.Printf("hashes: %d\n", maxNonces)
 	fmt.Printf("elapsed: %s\n", elapsed.Round(time.Millisecond))
 	fmt.Printf("hashrate: %.2f H/s\n", float64(maxNonces)/elapsed.Seconds())
@@ -365,18 +449,15 @@ func LatticeHash(header []byte, nonce uint64, dag *DAG) HashResult {
 		return out
 	}
 
-	// Round 1: seed mix = sha3_512(header || nonceLE)
 	seedInput := make([]byte, len(header)+8)
 	copy(seedInput, header)
 	binary.LittleEndian.PutUint64(seedInput[len(header):], nonce)
 
 	seed512 := sha3.Sum512(seedInput)
 
-	// mix = first 256 bits
 	var mix [32]byte
 	copy(mix[:], seed512[:32])
 
-	// Round 2: memory-hard traversal
 	var fnvInput [40]byte
 	var blakeInput [64]byte
 
@@ -385,9 +466,8 @@ func LatticeHash(header []byte, nonce uint64, dag *DAG) HashResult {
 		binary.LittleEndian.PutUint64(fnvInput[32:], r)
 
 		nodeIdx := fnv1a64(fnvInput[:]) % nodeCount
-		node := dag.Node(nodeIdx) // zero-copy node view into contiguous DAG
+		node := dag.Node(nodeIdx)
 
-		// mix' = blake3_256((mix XOR node[0:32]) || node[32:64])
 		for i := 0; i < 32; i++ {
 			blakeInput[i] = mix[i] ^ node[i]
 			blakeInput[32+i] = node[32+i]
@@ -397,7 +477,6 @@ func LatticeHash(header []byte, nonce uint64, dag *DAG) HashResult {
 		copy(mix[:], sum[:])
 	}
 
-	// Round 3: final compression = sha3_512(seed || mix)
 	finalInput := make([]byte, 64+32)
 	copy(finalInput[:64], seed512[:])
 	copy(finalInput[64:], mix[:])
