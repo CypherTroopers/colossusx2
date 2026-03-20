@@ -113,6 +113,13 @@ Show help:
 go run . -h
 ```
 
+Build once and run the compiled binary:
+
+```bash
+go build -o ./bin/colossusx .
+./bin/colossusx -h
+```
+
 Small research-mode unified benchmark:
 
 ```bash
@@ -139,6 +146,92 @@ go run . -mode strict -bench -backend unified
 
 Note that strict mode allocates the real 80 GiB DAG and is therefore not intended for ordinary local development machines.
 
+### Recommended command patterns
+
+For day-to-day development, the following command groups are the safest/easiest patterns to use based on the current code:
+
+#### 1. Basic CLI confirmation
+
+Check that the application starts and the flags parse correctly:
+
+```bash
+go run . -h
+```
+
+If you want to confirm the build artifact instead of `go run`:
+
+```bash
+go build -o ./bin/colossusx .
+./bin/colossusx -h
+```
+
+#### 2. Development benchmarks with a small DAG
+
+The code defaults to `strict` mode, so any small-DAG local benchmark must explicitly use `-mode research`.
+
+Unified backend:
+
+```bash
+go run . -mode research -bench -backend unified -dag-mib 1 -reads 8 -workers 2 -max-nonces 1000
+```
+
+CPU backend:
+
+```bash
+go run . -mode research -bench -backend cpu -dag-mib 1 -reads 8 -workers 2 -max-nonces 1000
+```
+
+GPU backend path validation with a research-sized DAG:
+
+```bash
+go run . -mode research -bench -backend gpu -dag-mib 1 -reads 8 -workers 2 -max-nonces 1000
+```
+
+If you want a slightly larger local benchmark:
+
+```bash
+go run . -mode research -bench -backend unified -dag-mib 8 -reads 32 -workers 4 -max-nonces 50000
+```
+
+#### 3. Easy mining/smoke-test runs
+
+Very easy target for a quick "solution found" sanity check:
+
+```bash
+go run . -mode research -backend unified -dag-mib 1 -reads 8 -workers 2 -max-nonces 10 -target ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
+```
+
+Same smoke test on the CPU backend:
+
+```bash
+go run . -mode research -backend cpu -dag-mib 1 -reads 8 -workers 2 -max-nonces 10 -target ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
+```
+
+Custom header / epoch seed example:
+
+```bash
+go run . \
+  -mode research \
+  -backend unified \
+  -dag-mib 1 \
+  -reads 8 \
+  -workers 2 \
+  -max-nonces 100 \
+  -header 00112233445566778899aabbccddeeff \
+  -epoch-seed 000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f \
+  -target ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
+```
+
+#### 4. Strict-mode runs
+
+Use strict mode only when you intentionally want protocol-sized parameters:
+
+```bash
+go run . -mode strict -bench -backend unified
+```
+
+Because strict mode uses the full 80 GiB DAG, this is not a practical default for ordinary local development.
+
 ## Makefile targets
 
 The repository includes a few convenience targets:
@@ -161,10 +254,71 @@ Current behavior of the helper targets:
 
 ## Testing
 
+### Main test commands
+
 Run the full test suite with:
 
 ```bash
 go test ./... -count=1
+```
+
+Run with verbose output:
+
+```bash
+go test ./... -count=1 -v
+```
+
+Run only the top-level package tests:
+
+```bash
+go test . -count=1
+```
+
+Run only the core algorithm package tests:
+
+```bash
+go test ./colossusx -count=1
+```
+
+Run a single named test when iterating locally:
+
+```bash
+go test ./... -count=1 -run TestStrictMode
+```
+
+Run backend-related tests only:
+
+```bash
+go test ./... -count=1 -run 'TestUnified|TestCPU|TestGPU|TestMemoryStrategy'
+```
+
+Run with the race detector for extra validation during development:
+
+```bash
+go test ./... -count=1 -race
+```
+
+### Build-oriented checks
+
+If you want a fast non-test verification pass, these are useful:
+
+Check that the module builds:
+
+```bash
+go build ./...
+```
+
+Build the CLI artifact explicitly:
+
+```bash
+go build -o ./bin/colossusx .
+```
+
+Validate dependencies are resolved:
+
+```bash
+go mod download
+go mod tidy
 ```
 
 The tests currently cover:
