@@ -138,6 +138,10 @@ func (r *nativeOpenCLRuntime) OpenCLContext() (OpenCLContext, bool) {
 	return r.ctx, r.available
 }
 
+func (r *nativeOpenCLRuntime) SetContext(ctx OpenCLContext) {
+	r.ctx = ctx
+}
+
 func allocOpenCLSVM(ctx OpenCLContext, size uint64) (managedAllocation, error) {
 	if C.colossusx_missing_opencl_headers() != 0 {
 		return nil, fmt.Errorf("opencl headers were not found at build time")

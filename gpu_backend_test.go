@@ -1,7 +1,9 @@
 package main
 
 import (
+	"errors"
 	"testing"
+	"unsafe"
 
 	cx "colossusx/colossusx"
 )
@@ -59,6 +61,54 @@ func (b *fakeGPUBackend) HashBatch(header []byte, startNonce cx.Nonce, count uin
 	return results, nil
 }
 
+type fakeOpenCLRuntime struct {
+	initErr     error
+	available   bool
+	svm         bool
+	ctx         OpenCLContext
+	initCalls   int
+	setCtxCalls int
+}
+
+func (r *fakeOpenCLRuntime) Initialize() error {
+	r.initCalls++
+	if r.initErr != nil {
+		return r.initErr
+	}
+	if r.ctx.Context == nil {
+		r.ctx = OpenCLContext{Context: unsafe.Pointer(uintptr(1)), Device: unsafe.Pointer(uintptr(2)), Queue: unsafe.Pointer(uintptr(3))}
+	}
+	return nil
+}
+func (r *fakeOpenCLRuntime) Available() bool { return r.available }
+func (r *fakeOpenCLRuntime) SupportsSVM() bool {
+	return r.svm
+}
+func (r *fakeOpenCLRuntime) CUDADeviceOrdinal() (int, bool) { return 0, false }
+func (r *fakeOpenCLRuntime) OpenCLContext() (OpenCLContext, bool) {
+	if !r.available {
+		return OpenCLContext{}, false
+	}
+	return r.ctx, true
+}
+func (r *fakeOpenCLRuntime) SetContext(ctx OpenCLContext) {
+	r.ctx = ctx
+	r.setCtxCalls++
+}
+
+func testResearchDAG(t *testing.T) *DAG {
+	t.Helper()
+	spec := Spec{Mode: cx.ModeResearch, DAGSizeBytes: 1024 * 1024, NodeSize: DefaultNodeSize, ReadsPerHash: 8, EpochBlocks: DefaultEpochBlocks}
+	dag, err := NewDAG(spec)
+	if err != nil {
+		t.Fatalf("NewDAG: %v", err)
+	}
+	if err := GenerateDAG(dag, []byte("0123456789abcdef0123456789abcdef"), 2); err != nil {
+		t.Fatalf("GenerateDAG: %v", err)
+	}
+	return dag
+}
+
 func TestGPUBackendCanBeConstructed(t *testing.T) {
 	backend, err := NewGPUBackend()
 	if err != nil {
@@ -73,16 +123,8 @@ func TestGPUBackendCanBeConstructed(t *testing.T) {
 }
 
 func TestGPUHashMatchesCPUReference(t *testing.T) {
-	spec := Spec{Mode: cx.ModeResearch, DAGSizeBytes: 1024 * 1024, NodeSize: DefaultNodeSize, ReadsPerHash: 8, EpochBlocks: DefaultEpochBlocks}
-	dag, err := NewDAG(spec)
-	if err != nil {
-		t.Fatalf("NewDAG: %v", err)
-	}
+	dag := testResearchDAG(t)
 	defer dag.Close()
-	seed := []byte("0123456789abcdef0123456789abcdef")
-	if err := GenerateDAG(dag, seed, 2); err != nil {
-		t.Fatalf("GenerateDAG: %v", err)
-	}
 	header := []byte("header")
 	nonce := cx.NewUint64Nonce(42)
 
@@ -131,5 +173,61 @@ func TestSuccessfulGPURunAvoidsNormalFallback(t *testing.T) {
 	}
 	if backend.fallbackUsed {
 		t.Fatal("expected successful GPU dispatch to avoid CPU fallback")
+	}
+}
+
+func TestOpenCLDispatcherHostReferencePlanSemantics(t *testing.T) {
+	dag := testResearchDAG(t)
+	defer dag.Close()
+	runtime := &fakeOpenCLRuntime{available: true, svm: true}
+	dispatcher := &openclDispatcher{runtime: runtime}
+	cfg := gpuKernelConfig{WorkgroupSize: 64, BatchNonces: 4, Source: openclKernelSource, VerifierPct: 100}
+	if err := dispatcher.Prepare(dag, cfg); err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+	result, err := dispatcher.Dispatch([]byte("header"), cx.NewUint64Nonce(10), 3, dag)
+	if err != nil {
+		t.Fatalf("Dispatch: %v", err)
+	}
+	if len(result.Hashes) != 3 {
+		t.Fatalf("expected 3 hashes, got %d", len(result.Hashes))
+	}
+	plan := result.Plan
+	if !plan.UsedFallback {
+		t.Fatal("expected host-reference dispatch to report UsedFallback=true")
+	}
+	if plan.ExecutionPath != GPUExecutionPathHostReference {
+		t.Fatalf("expected host-reference execution path, got %q", plan.ExecutionPath)
+	}
+	if plan.ExecutionBackend != "cpu-reference" {
+		t.Fatalf("expected cpu-reference execution backend, got %q", plan.ExecutionBackend)
+	}
+	if plan.CopiedDAG || plan.DeviceDAGCopyPerformed {
+		t.Fatalf("expected no device DAG copy, got CopiedDAG=%v DeviceDAGCopyPerformed=%v", plan.CopiedDAG, plan.DeviceDAGCopyPerformed)
+	}
+	if !plan.SVMEnabled {
+		t.Fatal("expected SVM metadata to reflect runtime capability")
+	}
+	if runtime.setCtxCalls == 0 {
+		t.Fatal("expected Prepare to wire buildOpenCLProgram output back into the runtime context")
+	}
+}
+
+func TestGPUBackendPrepareFailsHardWhenRuntimeUnavailable(t *testing.T) {
+	dag := testResearchDAG(t)
+	defer dag.Close()
+	backend := &GPUBackend{
+		config:     gpuKernelConfig{WorkgroupSize: 64, BatchNonces: 4, Source: openclKernelSource, VerifierPct: 100},
+		dispatcher: &openclDispatcher{runtime: &fakeOpenCLRuntime{initErr: errors.New("no opencl runtime")}},
+	}
+	if err := backend.Prepare(dag); err == nil {
+		t.Fatal("expected Prepare to fail when the OpenCL runtime cannot initialize")
+	}
+	plan := backend.ExecutionPlan()
+	if !plan.UsedFallback {
+		t.Fatal("expected runtime initialization failure to report fallback usage")
+	}
+	if plan.ExecutionPath != GPUExecutionPathHostReference {
+		t.Fatalf("expected host-reference execution path on failure, got %q", plan.ExecutionPath)
 	}
 }
