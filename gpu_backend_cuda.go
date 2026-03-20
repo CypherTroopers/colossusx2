@@ -42,15 +42,14 @@ func (r *nativeCUDARuntime) CUDADeviceOrdinal() (int, bool)       { return r.dev
 func (r *nativeCUDARuntime) OpenCLContext() (OpenCLContext, bool) { return OpenCLContext{}, false }
 
 type CUDAHashBackend struct {
-	runtime     cudaRuntime
-	cpuFallback CPUBackend
-	scratch     *pooledScratch
-	lastPlan    GPUExecutionPlan
+	runtime  cudaRuntime
+	scratch  *pooledScratch
+	lastPlan GPUExecutionPlan
 }
 
 func (b *CUDAHashBackend) Mode() BackendMode { return BackendGPU }
 func (b *CUDAHashBackend) Description() string {
-	return "cuda backend using a shared logical DAG image from cuda-managed memory; hashing remains on the validated host path until a spec-compliant CUDA kernel lands"
+	return "cuda backend that prepares cuda-managed DAG residency, but still reports host-reference execution until a dedicated CUDA LatticeHash kernel is implemented"
 }
 func (b *CUDAHashBackend) InitializeRuntime() error {
 	if b.runtime == nil {
@@ -73,8 +72,8 @@ func (b *CUDAHashBackend) Prepare(dag *DAG) error {
 		b.runtime = newCUDARuntime()
 	}
 	if err := b.runtime.Initialize(); err != nil {
-		b.lastPlan = GPUExecutionPlan{KernelName: "colossusx_cuda_hash", MemoryModel: GPUMemoryModelUnified, Fallback: "cpu-reference", UsedFallback: true}
-		return b.cpuFallback.Prepare(dag)
+		b.lastPlan = GPUExecutionPlan{KernelName: "colossusx_cuda_hash", MemoryModel: GPUMemoryModelUnified, Fallback: "runtime-unavailable", UsedFallback: true, ExecutionBackend: "cuda", ExecutionPath: GPUExecutionPathHostReference}
+		return err
 	}
 	if dag.AllocationName() != "cuda-managed" {
 		return fmt.Errorf("cuda backend requires cuda-managed DAG allocation")
@@ -85,20 +84,21 @@ func (b *CUDAHashBackend) Prepare(dag *DAG) error {
 	if b.scratch == nil {
 		b.scratch = newPooledScratch()
 	}
-	b.lastPlan = GPUExecutionPlan{KernelName: "colossusx_cuda_hash", BatchNonces: 1024, MemoryModel: GPUMemoryModelUnified, Fallback: "cpu-reference", UsedFallback: false, CopiedDAG: false}
+	b.lastPlan = GPUExecutionPlan{KernelName: "colossusx_cuda_hash", BatchNonces: 1024, MemoryModel: GPUMemoryModelUnified, Fallback: "cpu-reference", UsedFallback: true, CopiedDAG: false, ExecutionBackend: "cuda", ExecutionPath: GPUExecutionPathHostReference, DeviceDAGCopyPerformed: false, DeviceDispatchAttempted: false}
 	return nil
 }
 func (b *CUDAHashBackend) Hash(header []byte, nonce cx.Nonce, dag *DAG) HashResult {
 	results, err := b.HashBatch(header, nonce, 1, dag)
 	if err != nil || len(results) == 0 {
-		return b.cpuFallback.Hash(header, nonce, dag)
+		return HashResult{}
 	}
 	return results[0]
 }
 func (b *CUDAHashBackend) HashBatch(header []byte, startNonce cx.Nonce, count uint64, dag *DAG) ([]HashResult, error) {
 	if b.runtime == nil || !b.runtime.Available() {
 		b.lastPlan.UsedFallback = true
-		return b.cpuFallback.HashBatch(header, startNonce, count, dag)
+		b.lastPlan.ExecutionPath = GPUExecutionPathHostReference
+		return nil, fmt.Errorf("cuda runtime unavailable")
 	}
 	raw, err := newRawContiguousDAGBuffer(dag)
 	if err != nil {
@@ -118,7 +118,10 @@ func (b *CUDAHashBackend) HashBatch(header []byte, startNonce cx.Nonce, count ui
 		results = append(results, latticeHashWithAccessor(dag.Spec(), header, nonce, view, s))
 		b.scratch.release(s)
 	}
-	b.lastPlan.UsedFallback = false
+	b.lastPlan.UsedFallback = true
+	b.lastPlan.ExecutionPath = GPUExecutionPathHostReference
+	b.lastPlan.ExecutionBackend = "cpu-reference"
+	b.lastPlan.DeviceDispatchAttempted = false
 	return results, nil
 }
 func (b *CUDAHashBackend) ExecutionPlan() GPUExecutionPlan { return b.lastPlan }

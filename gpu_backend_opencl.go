@@ -1,9 +1,10 @@
-//go:build opencl
+//go:build !cuda
 
 package main
 
 import (
 	"fmt"
+	"unsafe"
 
 	cx "colossusx/colossusx"
 )
@@ -28,6 +29,11 @@ type GPUDispatcher interface {
 	RuntimeState() runtimeState
 }
 
+type kernelPreparedOpenCLRuntime interface {
+	openclRuntime
+	SetContext(OpenCLContext)
+}
+
 type openclDispatcher struct {
 	runtime openclRuntime
 	config  gpuKernelConfig
@@ -48,24 +54,46 @@ func (d *openclDispatcher) Prepare(dag *DAG, cfg gpuKernelConfig) error {
 	if cfg.Source == "" {
 		return fmt.Errorf("gpu backend requires an embedded OpenCL kernel source")
 	}
+	d.config = cfg
 	if err := d.runtime.Initialize(); err != nil {
-		d.plan = GPUExecutionPlan{KernelName: "colossusx_hash", BatchNonces: cfg.BatchNonces, LocalSize: cfg.WorkgroupSize, MemoryModel: GPUMemoryModelUnified, Fallback: "cpu-reference"}
+		d.plan = newHostReferenceGPUPlan("opencl", cfg)
+		d.plan.Fallback = "runtime-unavailable"
+		d.plan.UsedFallback = true
 		return err
+	}
+	ctx, ok := d.runtime.OpenCLContext()
+	if !ok {
+		d.plan = newHostReferenceGPUPlan("opencl", cfg)
+		d.plan.Fallback = "runtime-context-unavailable"
+		d.plan.UsedFallback = true
+		return fmt.Errorf("opencl runtime initialized without an exported context")
+	}
+	ctx, err := buildOpenCLProgram(ctx, cfg.Source)
+	if err != nil {
+		d.plan = newHostReferenceGPUPlan("opencl", cfg)
+		d.plan.Fallback = "kernel-build-failed"
+		d.plan.UsedFallback = true
+		return fmt.Errorf("build opencl program: %w", err)
+	}
+	if runtimeWithContext, ok := d.runtime.(kernelPreparedOpenCLRuntime); ok {
+		runtimeWithContext.SetContext(ctx)
 	}
 	if _, err := newRawContiguousDAGBuffer(dag); err != nil {
 		return err
 	}
-	copied := !d.runtime.SupportsSVM()
-	d.plan = GPUExecutionPlan{
-		KernelName:   "colossusx_hash",
-		GlobalSize:   cfg.BatchNonces,
-		LocalSize:    cfg.WorkgroupSize,
-		BatchNonces:  cfg.BatchNonces,
-		MemoryModel:  GPUMemoryModelUnified,
-		VerifySample: cfg.VerifierPct,
-		Fallback:     "cpu-reference",
-		CopiedDAG:    copied,
+	plan := newHostReferenceGPUPlan("opencl", cfg)
+	plan.SVMEnabled = d.runtime.SupportsSVM()
+	plan.Fallback = "cpu-reference"
+	if plan.SVMEnabled {
+		raw, err := newRawContiguousDAGBuffer(dag)
+		if err != nil {
+			return err
+		}
+		if err := setOpenCLSVMKernelArg(ctx, 0, raw.Ptr); err != nil {
+			return fmt.Errorf("configure OpenCL SVM DAG argument: %w", err)
+		}
 	}
+	d.plan = plan
 	if d.scratch == nil {
 		d.scratch = newPooledScratch()
 	}
@@ -73,22 +101,34 @@ func (d *openclDispatcher) Prepare(dag *DAG, cfg gpuKernelConfig) error {
 }
 
 func (d *openclDispatcher) Dispatch(header []byte, startNonce cx.Nonce, batch int, dag *DAG) (GPUDispatchResult, error) {
+	plan := d.plan
 	if batch <= 0 {
-		return GPUDispatchResult{Plan: d.plan}, nil
+		plan.UsedFallback = true
+		plan.ExecutionPath = GPUExecutionPathHostReference
+		return GPUDispatchResult{Plan: plan}, nil
 	}
 	if !d.runtime.Available() {
-		plan := d.plan
 		plan.UsedFallback = true
+		plan.ExecutionPath = GPUExecutionPathHostReference
 		return GPUDispatchResult{Plan: plan}, fmt.Errorf("opencl runtime unavailable")
 	}
 	raw, err := newRawContiguousDAGBuffer(dag)
 	if err != nil {
-		return GPUDispatchResult{Plan: d.plan}, err
+		return GPUDispatchResult{Plan: plan}, err
+	}
+	if plan.SVMEnabled {
+		if ctx, ok := d.runtime.OpenCLContext(); ok {
+			if err := setOpenCLSVMKernelArg(ctx, 0, raw.Ptr); err != nil {
+				plan.UsedFallback = true
+				plan.ExecutionPath = GPUExecutionPathHostReference
+				return GPUDispatchResult{Plan: plan}, fmt.Errorf("configure OpenCL SVM DAG argument: %w", err)
+			}
+		}
 	}
 	results := make([]HashResult, 0, batch)
 	view, err := newUnifiedMemoryDAGViewFromBytes(dag.Spec(), raw.Bytes)
 	if err != nil {
-		return GPUDispatchResult{Plan: d.plan}, err
+		return GPUDispatchResult{Plan: plan}, err
 	}
 	for i := 0; i < batch; i++ {
 		nonce, ok := startNonce.AddUint64(uint64(i))
@@ -99,9 +139,12 @@ func (d *openclDispatcher) Dispatch(header []byte, startNonce cx.Nonce, batch in
 		results = append(results, latticeHashWithAccessor(dag.Spec(), header, nonce, view, s))
 		d.scratch.release(s)
 	}
-	plan := d.plan
-	plan.UsedFallback = false
-	plan.CopiedDAG = !d.runtime.SupportsSVM()
+	plan.UsedFallback = true
+	plan.ExecutionPath = GPUExecutionPathHostReference
+	plan.ExecutionBackend = "cpu-reference"
+	plan.DeviceDispatchAttempted = false
+	plan.CopiedDAG = false
+	plan.DeviceDAGCopyPerformed = false
 	return GPUDispatchResult{Hashes: results, Plan: plan}, nil
 }
 
@@ -118,7 +161,7 @@ type GPUBackend struct {
 
 func (b *GPUBackend) Mode() BackendMode { return BackendGPU }
 func (b *GPUBackend) Description() string {
-	return "gpu backend that preserves the shared logical DAG image for validation; OpenCL runtime state informs memory residency, while hashing stays on the validated host path until a spec-compliant kernel is implemented"
+	return "gpu backend with OpenCL runtime preparation only; hashing currently remains on the validated host CPU reference path and does not yet perform device-side lattice hashing"
 }
 func (b *GPUBackend) InitializeRuntime() error {
 	if b.runtimeReady || b.runtimeInitError != nil {
@@ -149,7 +192,7 @@ func (b *GPUBackend) Prepare(dag *DAG) error {
 	}
 	if err := b.dispatcher.Prepare(dag, b.config); err != nil {
 		b.lastPlan = b.dispatcher.Plan()
-		return b.cpuFallback.Prepare(dag)
+		return err
 	}
 	b.lastPlan = b.dispatcher.Plan()
 	return nil
@@ -157,7 +200,7 @@ func (b *GPUBackend) Prepare(dag *DAG) error {
 func (b *GPUBackend) Hash(header []byte, nonce cx.Nonce, dag *DAG) HashResult {
 	results, err := b.HashBatch(header, nonce, 1, dag)
 	if err != nil || len(results) == 0 {
-		return b.cpuFallback.Hash(header, nonce, dag)
+		return HashResult{}
 	}
 	return results[0]
 }
@@ -167,10 +210,10 @@ func (b *GPUBackend) HashBatch(header []byte, startNonce cx.Nonce, count uint64,
 	}
 	result, err := b.dispatcher.Dispatch(header, startNonce, int(count), dag)
 	b.lastPlan = result.Plan
-	if err == nil {
-		return result.Hashes, nil
+	if err != nil {
+		return nil, err
 	}
-	return b.cpuFallback.HashBatch(header, startNonce, count, dag)
+	return result.Hashes, nil
 }
 
 func (b *GPUBackend) KernelSource() string            { return b.config.Source }
@@ -183,11 +226,31 @@ func NewGPUBackend() (HashBackend, error) {
 }
 
 const openclKernelSource = `
-// SPEC.md Section 2-4 note: a real OpenCL kernel must execute the full
-// COLOSSUS-X LatticeHash path on the device. Until that exists, the OpenCL
-// backend intentionally keeps hashing on the validated host path while the
-// runtime only informs memory residency and shared-DAG behavior.
+// Placeholder kernel only. SPEC.md requires device-side LatticeHash for a real
+// GPU hashing backend, but the current implementation still executes the
+// validated CPU reference path on the host.
 __kernel void colossusx_hash(__global const uchar *dag) {
     (void)dag;
 }
 `
+
+func newHostReferenceGPUPlan(executionBackend string, cfg gpuKernelConfig) GPUExecutionPlan {
+	return GPUExecutionPlan{
+		KernelName:              "colossusx_hash",
+		GlobalSize:              cfg.BatchNonces,
+		LocalSize:               cfg.WorkgroupSize,
+		BatchNonces:             cfg.BatchNonces,
+		MemoryModel:             GPUMemoryModelUnified,
+		VerifySample:            cfg.VerifierPct,
+		Fallback:                "cpu-reference",
+		UsedFallback:            true,
+		CopiedDAG:               false,
+		ExecutionBackend:        executionBackend,
+		ExecutionPath:           GPUExecutionPathHostReference,
+		SVMEnabled:              false,
+		DeviceDAGCopyPerformed:  false,
+		DeviceDispatchAttempted: false,
+	}
+}
+
+var _ = unsafe.Pointer(nil)
