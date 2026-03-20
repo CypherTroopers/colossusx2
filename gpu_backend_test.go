@@ -1,3 +1,5 @@
+//go:build !cuda
+
 package main
 
 import (
@@ -7,59 +9,6 @@ import (
 
 	cx "colossusx/colossusx"
 )
-
-type fakeRuntimeState struct {
-	cudaOrdinal int
-	cudaOK      bool
-	openclCtx   OpenCLContext
-	openclOK    bool
-}
-
-func (r fakeRuntimeState) CUDADeviceOrdinal() (int, bool) { return r.cudaOrdinal, r.cudaOK }
-func (r fakeRuntimeState) OpenCLContext() (OpenCLContext, bool) {
-	return r.openclCtx, r.openclOK
-}
-
-type fakeGPUBackend struct {
-	prepared      bool
-	fallbackUsed  bool
-	runtimeCalled bool
-	scratch       *pooledScratch
-}
-
-func (b *fakeGPUBackend) Mode() BackendMode   { return BackendGPU }
-func (b *fakeGPUBackend) Description() string { return "test gpu backend" }
-func (b *fakeGPUBackend) InitializeRuntime() error {
-	b.runtimeCalled = true
-	return nil
-}
-func (b *fakeGPUBackend) CUDADeviceOrdinal() (int, bool)       { return 7, true }
-func (b *fakeGPUBackend) OpenCLContext() (OpenCLContext, bool) { return OpenCLContext{}, false }
-func (b *fakeGPUBackend) Prepare(dag *DAG) error {
-	b.prepared = true
-	if b.scratch == nil {
-		b.scratch = newPooledScratch()
-	}
-	_, err := newRawContiguousDAGBuffer(dag)
-	return err
-}
-func (b *fakeGPUBackend) Hash(header []byte, nonce cx.Nonce, dag *DAG) HashResult {
-	s := b.scratch.acquire(len(header))
-	defer b.scratch.release(s)
-	view, _ := newUnifiedMemoryDAGViewFromBytes(dag.Spec(), dag.Bytes())
-	return latticeHashWithAccessor(dag.Spec(), header, nonce, view, s)
-}
-func (b *fakeGPUBackend) HashBatch(header []byte, startNonce cx.Nonce, count uint64, dag *DAG) ([]HashResult, error) {
-	results := make([]HashResult, 0, count)
-	for i := uint64(0); i < count; i++ {
-		nonce, ok := startNonce.AddUint64(i)
-		if !ok {
-			break
-		}
-		results = append(results, b.Hash(header, nonce, dag))
-	}
-	return results, nil
-}
 
 type recordingSharedKernel struct {
 	spec          Spec
@@ -83,6 +32,30 @@ func (k *recordingSharedKernel) HashBatchShared(header []byte, startNonce cx.Non
 		results = append(results, latticeHashSharedBuffer(k.spec, header, nonce, dag))
 	}
 	return results, nil
+}
+
+type fakeOpenCLDeviceKernel struct {
+	spec  Spec
+	calls int
+}
+
+func (k *fakeOpenCLDeviceKernel) HashBatchOpenCL(ctx OpenCLContext, spec Spec, header []byte, startNonce cx.Nonce, count uint64, dag rawContiguousDAGBuffer) ([]HashResult, error) {
+	k.calls++
+	results := make([]HashResult, 0, count)
+	for i := uint64(0); i < count; i++ {
+		nonce, ok := startNonce.AddUint64(i)
+		if !ok {
+			break
+		}
+		results = append(results, latticeHashSharedBuffer(spec, header, nonce, dag))
+	}
+	return results, nil
+}
+
+type failingOpenCLDeviceKernel struct{}
+
+func (failingOpenCLDeviceKernel) HashBatchOpenCL(ctx OpenCLContext, spec Spec, header []byte, startNonce cx.Nonce, count uint64, dag rawContiguousDAGBuffer) ([]HashResult, error) {
+	return nil, errors.New("device kernel launch failed")
 }
 
 type fakeOpenCLRuntime struct {
@@ -200,7 +173,7 @@ func TestSuccessfulGPURunAvoidsNormalFallback(t *testing.T) {
 	}
 }
 
-func TestOpenCLDispatcherSharedMemoryDeviceExecutionPlanSemantics(t *testing.T) {
+func TestOpenCLDispatcherSVMFallsBackToSharedHostReference(t *testing.T) {
 	dag := testResearchDAG(t)
 	defer dag.Close()
 	runtime := &fakeOpenCLRuntime{available: true, svm: true}
@@ -219,7 +192,7 @@ func TestOpenCLDispatcherSharedMemoryDeviceExecutionPlanSemantics(t *testing.T) 
 	}
 	plan := result.Plan
 	if !plan.UsedFallback {
-		t.Fatal("expected SVM-capable runtime without a real device kernel in tests to fall back to shared-host validation")
+		t.Fatal("expected SVM-capable runtime without a successful device kernel dispatch to fall back to shared-host validation")
 	}
 	if plan.ExecutionPath != GPUExecutionPathHostReference {
 		t.Fatalf("expected host-reference execution path for the Go shared-buffer validator, got %q", plan.ExecutionPath)
@@ -240,13 +213,95 @@ func TestOpenCLDispatcherSharedMemoryDeviceExecutionPlanSemantics(t *testing.T) 
 		t.Fatal("expected Prepare to wire buildOpenCLProgram output back into the runtime context")
 	}
 	if sharedKernel.calls != 0 {
-		t.Fatalf("expected the fake device path test to avoid invoking the host shared kernel, got %d calls", sharedKernel.calls)
+		t.Fatalf("expected the host shared kernel to remain unused on the shared-host reference path, got %d calls", sharedKernel.calls)
 	}
 	raw, err := newRawContiguousDAGBuffer(dag)
 	if err != nil {
 		t.Fatalf("newRawContiguousDAGBuffer: %v", err)
 	}
 	_ = raw
+}
+
+func TestOpenCLDispatcherReportsDeviceKernelOnlyAfterSuccessfulDeviceDispatch(t *testing.T) {
+	dag := testResearchDAG(t)
+	defer dag.Close()
+	runtime := &fakeOpenCLRuntime{available: true, svm: true}
+	deviceKernel := &fakeOpenCLDeviceKernel{spec: dag.Spec()}
+	dispatcher := &openclDispatcher{runtime: runtime, deviceSharedHash: deviceKernel}
+	cfg := gpuKernelConfig{WorkgroupSize: 64, BatchNonces: 4, Source: openclKernelSource, VerifierPct: 100}
+	if err := dispatcher.Prepare(dag, cfg); err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+	header := []byte("header")
+	startNonce := cx.NewUint64Nonce(10)
+	result, err := dispatcher.Dispatch(header, startNonce, 3, dag)
+	if err != nil {
+		t.Fatalf("Dispatch: %v", err)
+	}
+	if deviceKernel.calls != 1 {
+		t.Fatalf("expected one device-kernel dispatch, got %d", deviceKernel.calls)
+	}
+	if len(result.Hashes) != 3 {
+		t.Fatalf("expected 3 hashes, got %d", len(result.Hashes))
+	}
+	raw, err := newRawContiguousDAGBuffer(dag)
+	if err != nil {
+		t.Fatalf("newRawContiguousDAGBuffer: %v", err)
+	}
+	for i := 0; i < 3; i++ {
+		nonce, _ := startNonce.AddUint64(uint64(i))
+		want := latticeHashSharedBuffer(dag.Spec(), header, nonce, raw)
+		if result.Hashes[i] != want {
+			t.Fatalf("hash %d mismatch: got=%x want=%x", i, result.Hashes[i].Pow256, want.Pow256)
+		}
+	}
+	plan := result.Plan
+	if plan.UsedFallback {
+		t.Fatal("expected successful OpenCL device kernel dispatch to avoid fallback")
+	}
+	if plan.ExecutionPath != GPUExecutionPathDeviceKernel {
+		t.Fatalf("expected device-kernel execution path, got %q", plan.ExecutionPath)
+	}
+	if plan.ExecutionBackend != "opencl" {
+		t.Fatalf("expected opencl execution backend, got %q", plan.ExecutionBackend)
+	}
+	if !plan.DeviceDispatchAttempted {
+		t.Fatal("expected successful device dispatch to be reported")
+	}
+	if plan.CopiedDAG || plan.DeviceDAGCopyPerformed {
+		t.Fatalf("expected no device DAG copy, got CopiedDAG=%v DeviceDAGCopyPerformed=%v", plan.CopiedDAG, plan.DeviceDAGCopyPerformed)
+	}
+}
+
+func TestOpenCLDispatcherFallsBackToSharedHostWhenDeviceKernelFails(t *testing.T) {
+	dag := testResearchDAG(t)
+	defer dag.Close()
+	runtime := &fakeOpenCLRuntime{available: true, svm: true}
+	dispatcher := &openclDispatcher{runtime: runtime, deviceSharedHash: failingOpenCLDeviceKernel{}}
+	cfg := gpuKernelConfig{WorkgroupSize: 64, BatchNonces: 4, Source: openclKernelSource, VerifierPct: 100}
+	if err := dispatcher.Prepare(dag, cfg); err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+	result, err := dispatcher.Dispatch([]byte("header"), cx.NewUint64Nonce(10), 3, dag)
+	if err != nil {
+		t.Fatalf("Dispatch: %v", err)
+	}
+	if len(result.Hashes) != 3 {
+		t.Fatalf("expected 3 hashes, got %d", len(result.Hashes))
+	}
+	plan := result.Plan
+	if !plan.UsedFallback {
+		t.Fatal("expected failed device-kernel launch to fall back to shared-host execution")
+	}
+	if plan.ExecutionPath != GPUExecutionPathHostReference {
+		t.Fatalf("expected host-reference execution path after device-kernel failure, got %q", plan.ExecutionPath)
+	}
+	if plan.ExecutionBackend != "shared-host" {
+		t.Fatalf("expected shared-host execution backend after device-kernel failure, got %q", plan.ExecutionBackend)
+	}
+	if plan.DeviceDispatchAttempted {
+		t.Fatal("expected failed device-kernel launch to avoid claiming a successful device dispatch")
+	}
 }
 
 func TestGPUBackendPrepareFailsHardWhenRuntimeUnavailable(t *testing.T) {

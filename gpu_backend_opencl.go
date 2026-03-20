@@ -3,6 +3,7 @@
 package main
 
 import (
+	_ "embed"
 	"fmt"
 	"unsafe"
 
@@ -41,10 +42,6 @@ type openclDispatcher struct {
 	scratch          *pooledScratch
 	sharedKernel     sharedDAGHashKernel
 	deviceSharedHash openCLSharedAllocationKernel
-}
-
-type openCLSharedAllocationKernel interface {
-	HashBatchOpenCL(ctx OpenCLContext, spec Spec, header []byte, startNonce cx.Nonce, count uint64, dag rawContiguousDAGBuffer) ([]HashResult, error)
 }
 
 func (d *openclDispatcher) Initialize() error {
@@ -247,26 +244,8 @@ func NewGPUBackend() (HashBackend, error) {
 	return &GPUBackend{}, nil
 }
 
-const openclKernelSource = `
-// OpenCL SVM-backed shared-allocation kernel. It consumes the canonical
-// contiguous DAG allocation directly and writes full hash results into a shared
-// output buffer so the unified-memory-first data path remains copy-free.
-__constant ulong COLOSSUSX_FNV_OFFSET = 14695981039346656037UL;
-__constant ulong COLOSSUSX_FNV_PRIME = 1099511628211UL;
-
-ulong colossusx_fnv1a40(__private const uchar *data) {
-    ulong h = COLOSSUSX_FNV_OFFSET;
-    for (int i = 0; i < 40; ++i) {
-        h ^= (ulong)data[i];
-        h *= COLOSSUSX_FNV_PRIME;
-    }
-    return h;
-}
-
-__kernel void colossusx_hash(__global const uchar *dag) {
-    (void)dag;
-}
-`
+//go:embed opencl_kernel.cl
+var openclKernelSource string
 
 func newHostReferenceGPUPlan(executionBackend string, cfg gpuKernelConfig) GPUExecutionPlan {
 	return GPUExecutionPlan{
