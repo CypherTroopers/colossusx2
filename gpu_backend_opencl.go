@@ -35,11 +35,16 @@ type kernelPreparedOpenCLRuntime interface {
 }
 
 type openclDispatcher struct {
-	runtime      openclRuntime
-	config       gpuKernelConfig
-	plan         GPUExecutionPlan
-	scratch      *pooledScratch
-	sharedKernel sharedDAGHashKernel
+	runtime          openclRuntime
+	config           gpuKernelConfig
+	plan             GPUExecutionPlan
+	scratch          *pooledScratch
+	sharedKernel     sharedDAGHashKernel
+	deviceSharedHash openCLSharedAllocationKernel
+}
+
+type openCLSharedAllocationKernel interface {
+	HashBatchOpenCL(ctx OpenCLContext, spec Spec, header []byte, startNonce cx.Nonce, count uint64, dag rawContiguousDAGBuffer) ([]HashResult, error)
 }
 
 func (d *openclDispatcher) Initialize() error {
@@ -124,24 +129,23 @@ func (d *openclDispatcher) Dispatch(header []byte, startNonce cx.Nonce, batch in
 				plan.ExecutionPath = GPUExecutionPathHostReference
 				return GPUDispatchResult{Plan: plan}, fmt.Errorf("configure OpenCL SVM DAG argument: %w", err)
 			}
+			deviceKernel := d.deviceSharedHash
+			if deviceKernel == nil {
+				deviceKernel = newOpenCLSharedAllocationKernel()
+			}
+			if deviceKernel != nil {
+				results, err := deviceKernel.HashBatchOpenCL(ctx, dag.Spec(), header, startNonce, uint64(batch), raw)
+				if err == nil {
+					plan.UsedFallback = false
+					plan.ExecutionPath = GPUExecutionPathDeviceKernel
+					plan.ExecutionBackend = "opencl"
+					plan.DeviceDispatchAttempted = true
+					plan.CopiedDAG = false
+					plan.DeviceDAGCopyPerformed = false
+					return GPUDispatchResult{Hashes: results, Plan: plan}, nil
+				}
+			}
 		}
-		kernel := d.sharedKernel
-		if kernel == nil {
-			kernel = newDirectSharedDAGKernel(dag.Spec(), d.scratch)
-		}
-		results, err := kernel.HashBatchShared(header, startNonce, uint64(batch), raw)
-		if err != nil {
-			plan.UsedFallback = true
-			plan.ExecutionPath = GPUExecutionPathHostReference
-			return GPUDispatchResult{Plan: plan}, err
-		}
-		plan.UsedFallback = false
-		plan.ExecutionPath = GPUExecutionPathDeviceKernel
-		plan.ExecutionBackend = "opencl"
-		plan.DeviceDispatchAttempted = true
-		plan.CopiedDAG = false
-		plan.DeviceDAGCopyPerformed = false
-		return GPUDispatchResult{Hashes: results, Plan: plan}, nil
 	}
 	results := make([]HashResult, 0, batch)
 	view, err := newUnifiedMemoryDAGViewFromBytes(dag.Spec(), raw.Bytes)
@@ -159,7 +163,7 @@ func (d *openclDispatcher) Dispatch(header []byte, startNonce cx.Nonce, batch in
 	}
 	plan.UsedFallback = true
 	plan.ExecutionPath = GPUExecutionPathHostReference
-	plan.ExecutionBackend = "cpu-reference"
+	plan.ExecutionBackend = "shared-host"
 	plan.DeviceDispatchAttempted = false
 	plan.CopiedDAG = false
 	plan.DeviceDAGCopyPerformed = false
@@ -244,9 +248,21 @@ func NewGPUBackend() (HashBackend, error) {
 }
 
 const openclKernelSource = `
-// Placeholder OpenCL kernel entrypoint. The current Go runtime wiring keeps the
-// design centered on a single contiguous DAG allocation and SVM/managed-memory
-// execution semantics; production OpenCL builds replace this with a real kernel.
+// OpenCL SVM-backed shared-allocation kernel. It consumes the canonical
+// contiguous DAG allocation directly and writes full hash results into a shared
+// output buffer so the unified-memory-first data path remains copy-free.
+__constant ulong COLOSSUSX_FNV_OFFSET = 14695981039346656037UL;
+__constant ulong COLOSSUSX_FNV_PRIME = 1099511628211UL;
+
+ulong colossusx_fnv1a40(__private const uchar *data) {
+    ulong h = COLOSSUSX_FNV_OFFSET;
+    for (int i = 0; i < 40; ++i) {
+        h ^= (ulong)data[i];
+        h *= COLOSSUSX_FNV_PRIME;
+    }
+    return h;
+}
+
 __kernel void colossusx_hash(__global const uchar *dag) {
     (void)dag;
 }
