@@ -12,15 +12,18 @@ type sharedDAGHashKernel interface {
 	HashBatchShared(header []byte, startNonce cx.Nonce, count uint64, dag rawContiguousDAGBuffer) ([]HashResult, error)
 }
 
-type directSharedDAGKernel struct {
+// hostReferenceSharedDAGKernel is the validation/reference implementation for
+// hashing directly from the canonical contiguous DAG allocation on the host CPU.
+// It intentionally does not represent accelerator/device-kernel execution.
+type hostReferenceSharedDAGKernel struct {
 	spec Spec
 }
 
-func newDirectSharedDAGKernel(spec Spec, _ *pooledScratch) *directSharedDAGKernel {
-	return &directSharedDAGKernel{spec: spec}
+func newHostReferenceSharedDAGKernel(spec Spec, _ *pooledScratch) *hostReferenceSharedDAGKernel {
+	return &hostReferenceSharedDAGKernel{spec: spec}
 }
 
-func (k *directSharedDAGKernel) HashBatchShared(header []byte, startNonce cx.Nonce, count uint64, dag rawContiguousDAGBuffer) ([]HashResult, error) {
+func (k *hostReferenceSharedDAGKernel) HashBatchShared(header []byte, startNonce cx.Nonce, count uint64, dag rawContiguousDAGBuffer) ([]HashResult, error) {
 	results := make([]HashResult, 0, count)
 	for i := uint64(0); i < count; i++ {
 		nonce, ok := startNonce.AddUint64(i)

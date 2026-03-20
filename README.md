@@ -6,14 +6,14 @@ The current repository is primarily a **reference implementation and research ha
 
 - the strict specification is enforced in code,
 - the `unified` and `cpu` backends both execute the same hashing algorithm,
-- the `gpu` backend is enabled and currently uses the same hash-equivalent unified-memory execution path as the reference backend while OpenCL device dispatch remains optional future work,
+- the `gpu` backend keeps `rawContiguousDAGBuffer` as the canonical DAG representation and now distinguishes true device-kernel execution from the shared-host validation/reference path, so unified-memory plans only report `device-kernel` after a real accelerator dispatch succeeds,
 - research mode exists for small, testable DAGs that fit on ordinary development machines.
 
 ## Repository layout
 
 - `colossusx/`: core types and algorithm implementation: spec validation, nonce abstraction, DAG generation, lattice hashing, target comparison, miner orchestration, and tests.
 - `main.go`: CLI parsing, mode/backend selection, DAG allocation strategy selection, DAG population, mining/benchmark execution, and console output.
-- `backend_*.go`: backend adapters for unified-memory-style access, CPU-copied DAG access, and GPU/OpenCL scaffolding with a reference-equivalent GPU fallback path.
+- `backend_*.go`: backend adapters for unified-memory-style access, CPU-copied DAG access, and GPU/OpenCL scaffolding with a shared-host reference path plus device-kernel dispatch where a real accelerator kernel exists.
 - `memory_strategy.go`: DAG allocation strategy selection (`auto`, `go-heap`, `pinned-host`, `cuda-managed`, `opencl-svm`).
 - `dag_helpers.go`: thin wrappers used by the CLI/tests for DAG construction and generation.
 - `SPEC.md`: design/spec narrative for the COLOSSUS-X algorithm.
@@ -85,7 +85,7 @@ This means it should produce the same hashes as `unified`, but it does **not** s
 
 The GPU backend is available for mining in the current codebase.
 
-Today the `gpu` backend executes the same hash-equivalent unified-memory path as the reference implementation, so GPU-mode CLI runs and backend selection work without waiting for a dedicated OpenCL kernel to land. The repository still contains OpenCL-oriented planning/build-tagged files, and OpenCL dispatch remains optional future work behind the same backend surface.
+Today the host-side shared-buffer Go path remains available as a validation/reference implementation, but it is reported as a host-reference / shared-host execution path instead of a device kernel. Real `device-kernel` reporting is reserved for backend-specific kernels that execute against the canonical shared allocation directly, without an explicit DAG copy.
 
 ## DAG allocation strategies
 

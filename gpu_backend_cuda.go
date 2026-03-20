@@ -73,7 +73,7 @@ func (b *CUDAHashBackend) Prepare(dag *DAG) error {
 		b.runtime = newCUDARuntime()
 	}
 	if err := b.runtime.Initialize(); err != nil {
-		b.lastPlan = GPUExecutionPlan{KernelName: "colossusx_cuda_hash", MemoryModel: GPUMemoryModelUnified, Fallback: "runtime-unavailable", UsedFallback: true, ExecutionBackend: "cuda", ExecutionPath: GPUExecutionPathHostReference}
+		b.lastPlan = GPUExecutionPlan{KernelName: "colossusx_cuda_hash", MemoryModel: GPUMemoryModelUnified, Fallback: "runtime-unavailable", UsedFallback: true, ExecutionBackend: "shared-host", ExecutionPath: GPUExecutionPathHostReference}
 		return err
 	}
 	if dag.AllocationName() != "cuda-managed" {
@@ -85,7 +85,7 @@ func (b *CUDAHashBackend) Prepare(dag *DAG) error {
 	if b.scratch == nil {
 		b.scratch = newPooledScratch()
 	}
-	b.lastPlan = GPUExecutionPlan{KernelName: "colossusx_cuda_hash", BatchNonces: 1024, MemoryModel: GPUMemoryModelUnified, Fallback: "cpu-reference", UsedFallback: true, CopiedDAG: false, ExecutionBackend: "cuda", ExecutionPath: GPUExecutionPathHostReference, DeviceDAGCopyPerformed: false, DeviceDispatchAttempted: false}
+	b.lastPlan = GPUExecutionPlan{KernelName: "colossusx_cuda_hash", BatchNonces: 1024, MemoryModel: GPUMemoryModelUnified, Fallback: "shared-host-reference", UsedFallback: true, CopiedDAG: false, ExecutionBackend: "shared-host", ExecutionPath: GPUExecutionPathHostReference, DeviceDAGCopyPerformed: false, DeviceDispatchAttempted: false}
 	return nil
 }
 func (b *CUDAHashBackend) Hash(header []byte, nonce cx.Nonce, dag *DAG) HashResult {
@@ -107,20 +107,20 @@ func (b *CUDAHashBackend) HashBatch(header []byte, startNonce cx.Nonce, count ui
 	}
 	kernel := b.sharedKernel
 	if kernel == nil {
-		kernel = newDirectSharedDAGKernel(dag.Spec(), b.scratch)
+		kernel = newHostReferenceSharedDAGKernel(dag.Spec(), b.scratch)
 	}
 	results, err := kernel.HashBatchShared(header, startNonce, count, raw)
 	if err != nil {
 		b.lastPlan.UsedFallback = true
 		b.lastPlan.ExecutionPath = GPUExecutionPathHostReference
-		b.lastPlan.ExecutionBackend = "cpu-reference"
+		b.lastPlan.ExecutionBackend = "shared-host"
 		b.lastPlan.DeviceDispatchAttempted = false
 		return nil, err
 	}
-	b.lastPlan.UsedFallback = false
-	b.lastPlan.ExecutionPath = GPUExecutionPathDeviceKernel
-	b.lastPlan.ExecutionBackend = "cuda"
-	b.lastPlan.DeviceDispatchAttempted = true
+	b.lastPlan.UsedFallback = true
+	b.lastPlan.ExecutionPath = GPUExecutionPathHostReference
+	b.lastPlan.ExecutionBackend = "shared-host"
+	b.lastPlan.DeviceDispatchAttempted = false
 	b.lastPlan.CopiedDAG = false
 	b.lastPlan.DeviceDAGCopyPerformed = false
 	return results, nil
