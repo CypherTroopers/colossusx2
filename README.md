@@ -6,14 +6,14 @@ The current repository is primarily a **reference implementation and research ha
 
 - the strict specification is enforced in code,
 - the `unified` and `cpu` backends both execute the same hashing algorithm,
-- the GPU path is intentionally disabled until it is proven hash-equivalent to the CPU reference,
+- the `gpu` backend is enabled and currently uses the same hash-equivalent unified-memory execution path as the reference backend while OpenCL device dispatch remains optional future work,
 - research mode exists for small, testable DAGs that fit on ordinary development machines.
 
 ## Repository layout
 
 - `colossusx/`: core types and algorithm implementation: spec validation, nonce abstraction, DAG generation, lattice hashing, target comparison, miner orchestration, and tests.
 - `main.go`: CLI parsing, mode/backend selection, DAG allocation strategy selection, DAG population, mining/benchmark execution, and console output.
-- `backend_*.go`: backend adapters for unified-memory-style access, CPU-copied DAG access, and currently disabled GPU/OpenCL scaffolding.
+- `backend_*.go`: backend adapters for unified-memory-style access, CPU-copied DAG access, and GPU/OpenCL scaffolding with a reference-equivalent GPU fallback path.
 - `memory_strategy.go`: DAG allocation strategy selection (`auto`, `go-heap`, `pinned-host`, `cuda-managed`, `opencl-svm`).
 - `dag_helpers.go`: thin wrappers used by the CLI/tests for DAG construction and generation.
 - `SPEC.md`: design/spec narrative for the COLOSSUS-X algorithm.
@@ -83,9 +83,9 @@ This means it should produce the same hashes as `unified`, but it does **not** s
 
 ### `gpu`
 
-The GPU backend is **not available for mining** in the current codebase.
+The GPU backend is available for mining in the current codebase.
 
-The repository contains OpenCL-oriented planning/stub code and build-tagged files, but `NewGPUBackend()` returns an explicit not-implemented error because hash equivalence has not been established yet.
+Today the `gpu` backend executes the same hash-equivalent unified-memory path as the reference implementation, so GPU-mode CLI runs and backend selection work without waiting for a dedicated OpenCL kernel to land. The repository still contains OpenCL-oriented planning/build-tagged files, and OpenCL dispatch remains optional future work behind the same backend surface.
 
 ## DAG allocation strategies
 
@@ -177,7 +177,7 @@ The tests currently cover:
 - unified/backend parity,
 - unified shared-memory behavior versus CPU copied-memory behavior,
 - DAG allocation strategy fallback/error handling,
-- explicit GPU disablement.
+- enabled GPU backend selection with a reference-equivalent fallback path.
 
 ## Build requirements
 
@@ -194,4 +194,4 @@ The tests currently cover:
 
 ## Status summary
 
-This repository currently provides a solid CPU/reference implementation for the COLOSSUS-X core algorithm and a realistic shape for future unified-memory and GPU work, but it does **not** yet provide a production-ready GPU miner.
+This repository currently provides a solid CPU/reference implementation for the COLOSSUS-X core algorithm plus an enabled `gpu` backend mode that preserves hash equivalence by running through the unified-memory execution path until dedicated device dispatch is ready.
