@@ -13,6 +13,7 @@ import (
 	cx "colossusx/colossusx"
 	"colossusx/pkg/chain"
 	"colossusx/pkg/consensus"
+	"colossusx/pkg/miner"
 	"colossusx/pkg/p2p"
 	"colossusx/pkg/types"
 )
@@ -33,16 +34,20 @@ type Node struct {
 	cfg       Config
 	store     chain.Store
 	validator *consensus.Validator
+	miner     *miner.Service
 	p2p       *p2p.Server
 	mu        sync.RWMutex
 }
 
-func New(cfg Config, validator *consensus.Validator, store chain.Store) (*Node, error) {
+func New(cfg Config, validator *consensus.Validator, minerSvc *miner.Service, store chain.Store) (*Node, error) {
 	if store == nil {
 		store = chain.NewMemoryStore()
 	}
 	if validator == nil {
 		return nil, fmt.Errorf("validator is required")
+	}
+	if minerSvc == nil {
+		return nil, fmt.Errorf("miner service is required")
 	}
 	if cfg.BlockTime <= 0 {
 		cfg.BlockTime = time.Second
@@ -53,7 +58,7 @@ func New(cfg Config, validator *consensus.Validator, store chain.Store) (*Node, 
 	if cfg.NodeID == "" {
 		cfg.NodeID = fmt.Sprintf("node-%d", time.Now().UnixNano())
 	}
-	n := &Node{cfg: cfg, validator: validator, store: store}
+	n := &Node{cfg: cfg, validator: validator, miner: minerSvc, store: store}
 	n.p2p = p2p.NewServer(p2p.Config{
 		NodeID:        cfg.NodeID,
 		Network:       cfg.Chain.NetworkID,
@@ -80,7 +85,7 @@ func (n *Node) InitGenesis() (types.Block, error) {
 		return tip, nil
 	}
 	genesis := types.NewGenesisBlock(n.cfg.Genesis)
-	sealed, res, err := n.validator.SealBlock(genesis, n.cfg.MaxNonces)
+	sealed, res, err := n.miner.SealBlock(genesis, n.cfg.MaxNonces)
 	if err != nil {
 		return types.Block{}, err
 	}
@@ -152,7 +157,7 @@ func (n *Node) mineNextBlock() (types.Block, cx.MineResult, error) {
 		StateRoot:    sha256.Sum256([]byte(tip.BlockHash().String())),
 	}
 	block := types.Block{Header: header}
-	sealed, res, err := n.validator.SealBlock(block, n.cfg.MaxNonces)
+	sealed, res, err := n.miner.SealBlock(block, n.cfg.MaxNonces)
 	if err != nil {
 		return types.Block{}, cx.MineResult{}, err
 	}

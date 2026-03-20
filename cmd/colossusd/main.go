@@ -15,6 +15,8 @@ import (
 	cx "colossusx/colossusx"
 	"colossusx/pkg/chain"
 	"colossusx/pkg/consensus"
+	"colossusx/pkg/miner"
+	"colossusx/pkg/mining"
 	"colossusx/pkg/node"
 	"colossusx/pkg/types"
 )
@@ -25,13 +27,43 @@ func main() {
 		log.Fatal(err)
 	}
 
-	validator, err := consensus.NewValidator(cfg.Chain, consensus.CPUBackend{}, cfg.Workers)
+	validatorBackend, err := mining.NewBackend(cfg.ValidatorBackend)
+	if err != nil {
+		log.Fatal(err)
+	}
+	validator, err := consensus.NewValidator(cfg.Chain, validatorBackend, cfg.Workers)
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer func() {
 		if err := validator.Close(); err != nil {
 			log.Printf("validator close: %v", err)
+		}
+	}()
+
+	minerBackend, err := mining.NewBackend(cfg.MinerBackend)
+	if err != nil {
+		log.Fatal(err)
+	}
+	minerRuntime, err := mining.InitializeBackendRuntime(minerBackend)
+	if err != nil {
+		log.Fatal(err)
+	}
+	minerMode, err := mining.ParseBackendMode(cfg.MinerBackend)
+	if err != nil {
+		log.Fatal(err)
+	}
+	allocator, err := mining.ResolveDAGStrategy(minerMode, cfg.MinerDAGAlloc, minerRuntime)
+	if err != nil {
+		log.Fatal(err)
+	}
+	minerSvc, err := miner.NewService(cfg.Chain.Spec, cfg.Workers, minerBackend, allocator)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer func() {
+		if err := minerSvc.Close(); err != nil {
+			log.Printf("miner close: %v", err)
 		}
 	}()
 
@@ -49,7 +81,7 @@ func main() {
 		NodeID:     cfg.NodeID,
 		ListenAddr: cfg.ListenAddr,
 		Bootnodes:  cfg.Bootnodes,
-	}, validator, store)
+	}, validator, minerSvc, store)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -57,23 +89,27 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	fmt.Printf("colossusd starting network=%s mode=%s dag=%dMiB workers=%d mine=%t datadir=%s listen=%s bootnodes=%d node_id=%s\n", cfg.Chain.NetworkID, cfg.Chain.Spec.Mode, cfg.Chain.Spec.DAGSizeBytes/(1024*1024), cfg.Workers, cfg.Mine, cfg.DataDir, cfg.ListenAddr, len(cfg.Bootnodes), cfg.NodeID)
+	fmt.Printf("colossusd starting network=%s mode=%s dag=%dMiB workers=%d mine=%t datadir=%s listen=%s bootnodes=%d node_id=%s validator_backend=%s miner_backend=%s miner_dag_alloc=%s resolved_alloc=%s runtime_initialized=%t\n", cfg.Chain.NetworkID, cfg.Chain.Spec.Mode, cfg.Chain.Spec.DAGSizeBytes/(1024*1024), cfg.Workers, cfg.Mine, cfg.DataDir, cfg.ListenAddr, len(cfg.Bootnodes), cfg.NodeID, cfg.ValidatorBackend, cfg.MinerBackend, cfg.MinerDAGAlloc, allocator.Name(), minerRuntime != nil)
 	if err := n.Run(ctx); err != nil && err != context.Canceled {
 		log.Fatal(err)
 	}
 }
 
 type config struct {
-	Chain      types.ChainConfig
-	Genesis    types.GenesisConfig
-	Mine       bool
-	Workers    int
-	MaxNonces  uint64
-	BlockTime  time.Duration
-	DataDir    string
-	ListenAddr string
-	Bootnodes  []string
-	NodeID     string
+	Chain             types.ChainConfig
+	Genesis           types.GenesisConfig
+	Mine              bool
+	Workers           int
+	MaxNonces         uint64
+	BlockTime         time.Duration
+	DataDir           string
+	ListenAddr        string
+	Bootnodes         []string
+	NodeID            string
+	MinerBackend      string
+	MinerDAGAlloc     string
+	ValidatorBackend  string
+	ValidatorDAGAlloc string
 }
 
 func parseFlags() (config, error) {
@@ -94,6 +130,10 @@ func parseFlags() (config, error) {
 	bootnodes := fs.String("bootnodes", "", "comma-separated bootnode addresses")
 	nodeID := fs.String("node-id", "", "stable node identifier")
 	targetHex := fs.String("target", "0fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", "mining target in hex")
+	minerBackend := fs.String("miner-backend", string(cx.BackendCPU), "mining backend: unified, cpu, or gpu")
+	minerDAGAlloc := fs.String("miner-dag-alloc", "auto", "mining dag allocation: auto, go-heap, pinned-host, cuda-managed, opencl-svm")
+	validatorBackend := fs.String("validator-backend", string(cx.BackendCPU), "validation backend: cpu by default")
+	validatorDAGAlloc := fs.String("validator-dag-alloc", "go-heap", "validation dag allocation (reserved for future wiring)")
 	rpcListen := fs.String("rpc-listen", "", "reserved for future RPC listener")
 	_ = rpcListen
 	if err := fs.Parse(os.Args[1:]); err != nil {
@@ -129,5 +169,5 @@ func parseFlags() (config, error) {
 		Spec:      spec,
 		ExtraData: fmt.Sprintf("mode=%s", spec.Mode),
 	}
-	return config{Chain: chainCfg, Genesis: genesis, Mine: *mine, Workers: *workers, MaxNonces: *maxNonces, BlockTime: *blockTime, DataDir: *dataDir, ListenAddr: *listenAddr, Bootnodes: node.ParseBootnodes(*bootnodes), NodeID: *nodeID}, nil
+	return config{Chain: chainCfg, Genesis: genesis, Mine: *mine, Workers: *workers, MaxNonces: *maxNonces, BlockTime: *blockTime, DataDir: *dataDir, ListenAddr: *listenAddr, Bootnodes: node.ParseBootnodes(*bootnodes), NodeID: *nodeID, MinerBackend: *minerBackend, MinerDAGAlloc: *minerDAGAlloc, ValidatorBackend: *validatorBackend, ValidatorDAGAlloc: *validatorDAGAlloc}, nil
 }

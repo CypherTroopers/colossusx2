@@ -1,0 +1,171 @@
+package mining
+
+import (
+	"fmt"
+	"strings"
+
+	cx "colossusx/colossusx"
+)
+
+type managedAllocation = cx.Allocation
+
+type MemoryStrategy interface {
+	cx.Allocator
+}
+
+type runtimeState interface {
+	CUDADeviceOrdinal() (int, bool)
+	OpenCLContext() (OpenCLContext, bool)
+}
+
+type dagStrategyResolver struct {
+	backend BackendMode
+	runtime runtimeState
+}
+
+type fallbackMemoryStrategy struct {
+	name       string
+	strategies []MemoryStrategy
+}
+
+func (m fallbackMemoryStrategy) Alloc(size uint64) (cx.Allocation, error) {
+	var errs []string
+	for _, strategy := range m.strategies {
+		if strategy == nil {
+			continue
+		}
+		alloc, err := strategy.Alloc(size)
+		if err == nil {
+			return alloc, nil
+		}
+		errs = append(errs, fmt.Sprintf("%s: %v", strategy.Name(), err))
+	}
+	if len(errs) == 0 {
+		return nil, fmt.Errorf("%s: no allocation strategies configured", m.Name())
+	}
+	return nil, fmt.Errorf("%s: %s", m.Name(), strings.Join(errs, "; "))
+}
+
+func (m fallbackMemoryStrategy) Name() string {
+	if m.name == "" {
+		return "fallback"
+	}
+	return m.name
+}
+
+type sliceAllocation struct {
+	name string
+	buf  []byte
+	free func() error
+}
+
+func (a *sliceAllocation) Bytes() []byte { return a.buf }
+func (a *sliceAllocation) Name() string  { return a.name }
+func (a *sliceAllocation) Free() error {
+	if a == nil || a.free == nil {
+		return nil
+	}
+	return a.free()
+}
+
+type GoHeapMemory struct{}
+
+func (GoHeapMemory) Alloc(size uint64) (cx.Allocation, error) {
+	return &sliceAllocation{name: "go-heap", buf: make([]byte, size)}, nil
+}
+func (GoHeapMemory) Name() string { return "go-heap" }
+
+type PinnedMemory struct{}
+
+func (PinnedMemory) Alloc(size uint64) (cx.Allocation, error) {
+	return allocPinnedHost(size)
+}
+func (PinnedMemory) Name() string { return "pinned-host" }
+
+type CUDAManagedMemory struct {
+	DeviceOrdinal int
+	Ready         bool
+}
+
+func (m CUDAManagedMemory) Alloc(size uint64) (cx.Allocation, error) {
+	if !m.Ready {
+		return nil, fmt.Errorf("cuda managed allocation requires initialized runtime/device")
+	}
+	return allocCUDAManaged(m.DeviceOrdinal, size)
+}
+func (CUDAManagedMemory) Name() string { return "cuda-managed" }
+
+type OpenCLSVM struct {
+	Context OpenCLContext
+}
+
+func (m OpenCLSVM) Alloc(size uint64) (cx.Allocation, error) {
+	if !m.Context.valid() {
+		return nil, fmt.Errorf("opencl svm requires a live OpenCL context and device")
+	}
+	return allocOpenCLSVM(m.Context, size)
+}
+func (OpenCLSVM) Name() string { return "opencl-svm" }
+
+type notImplementedError string
+
+func (e notImplementedError) Error() string { return "not implemented: " + string(e) }
+func ErrNotImplemented(s string) error      { return notImplementedError(s) }
+
+func selectDAGStrategy(backend BackendMode, dagAlloc string) (MemoryStrategy, error) {
+	return dagStrategyResolver{backend: backend}.Resolve(dagAlloc)
+}
+
+func (r dagStrategyResolver) Resolve(dagAlloc string) (MemoryStrategy, error) {
+	choice := strings.ToLower(strings.TrimSpace(dagAlloc))
+	if choice == "" {
+		choice = "auto"
+	}
+	if choice == "auto" {
+		return fallbackMemoryStrategy{name: "auto", strategies: r.autoStrategies()}, nil
+	}
+	switch choice {
+	case "go", "go-heap":
+		return GoHeapMemory{}, nil
+	case "pinned", "pinned-host":
+		return PinnedMemory{}, nil
+	case "cuda", "cuda-managed":
+		if ordinal, ok := r.cudaDeviceOrdinal(); ok {
+			return CUDAManagedMemory{DeviceOrdinal: ordinal, Ready: true}, nil
+		}
+		return nil, fmt.Errorf("cuda managed allocation requires initialized runtime/device")
+	case "opencl", "opencl-svm", "svm":
+		if ctx, ok := r.openclContext(); ok {
+			return OpenCLSVM{Context: ctx}, nil
+		}
+		return nil, fmt.Errorf("opencl svm requires a live OpenCL context and device")
+	default:
+		return nil, fmt.Errorf("unsupported dag allocation strategy %q (expected one of: auto, go-heap, pinned-host, cuda-managed, opencl-svm)", dagAlloc)
+	}
+}
+
+func (r dagStrategyResolver) autoStrategies() []MemoryStrategy {
+	strategies := make([]MemoryStrategy, 0, 3)
+	if ordinal, ok := r.cudaDeviceOrdinal(); ok {
+		strategies = append(strategies, CUDAManagedMemory{DeviceOrdinal: ordinal, Ready: true})
+	}
+	if ctx, ok := r.openclContext(); ok {
+		strategies = append(strategies, OpenCLSVM{Context: ctx})
+	}
+	strategies = append(strategies, GoHeapMemory{})
+	return strategies
+}
+
+func (r dagStrategyResolver) cudaDeviceOrdinal() (int, bool) {
+	if r.runtime == nil {
+		return 0, false
+	}
+	return r.runtime.CUDADeviceOrdinal()
+}
+
+func (r dagStrategyResolver) openclContext() (OpenCLContext, bool) {
+	if r.runtime == nil {
+		return OpenCLContext{}, false
+	}
+	return r.runtime.OpenCLContext()
+}

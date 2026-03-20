@@ -6,6 +6,8 @@ import (
 
 	cx "colossusx/colossusx"
 	"colossusx/pkg/chain"
+	"colossusx/pkg/miner"
+	"colossusx/pkg/mining"
 	"colossusx/pkg/types"
 )
 
@@ -29,7 +31,12 @@ func TestValidatorInsertBlock(t *testing.T) {
 	}
 	defer v.Close()
 	store := chain.NewMemoryStore()
-	genesis, _, err := v.SealBlock(types.NewGenesisBlock(genesisCfg), 10)
+	minerSvc, err := miner.NewService(chainCfg.Spec, 1, &mining.CPUBackend{}, mining.GoHeapMemory{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer minerSvc.Close()
+	genesis, _, err := minerSvc.SealBlock(types.NewGenesisBlock(genesisCfg), 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -41,7 +48,7 @@ func TestValidatorInsertBlock(t *testing.T) {
 		t.Fatalf("expected genesis to become tip")
 	}
 	next := types.Block{Header: types.BlockHeader{Version: 1, Height: 1, ParentHash: genesis.BlockHash(), Timestamp: genesis.Header.Timestamp + 1, Target: genesisCfg.Bits, EpochSeed: types.EpochSeedForHeight(chainCfg.Spec, 1), DAGSizeBytes: chainCfg.Spec.DAGSizeBytes}}
-	sealed, _, err := v.SealBlock(next, 10)
+	sealed, _, err := minerSvc.SealBlock(next, 10)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -11,6 +11,7 @@ import (
 
 	cx "colossusx/colossusx"
 	"colossusx/pkg/chain"
+	"colossusx/pkg/mining"
 	"colossusx/pkg/types"
 )
 
@@ -37,19 +38,6 @@ type dagKey struct {
 	size uint64
 }
 
-type sliceAllocation struct{ buf []byte }
-
-func (a *sliceAllocation) Bytes() []byte { return a.buf }
-func (a *sliceAllocation) Free() error   { a.buf = nil; return nil }
-func (a *sliceAllocation) Name() string  { return "go-slice" }
-
-type sliceAllocator struct{}
-
-func (sliceAllocator) Alloc(size uint64) (cx.Allocation, error) {
-	return &sliceAllocation{buf: make([]byte, size)}, nil
-}
-func (sliceAllocator) Name() string { return "go-slice" }
-
 type CPUBackend struct{}
 
 func (CPUBackend) Mode() cx.BackendMode  { return cx.BackendCPU }
@@ -75,7 +63,7 @@ func NewValidator(cfg types.ChainConfig, backend cx.HashBackend, workers int) (*
 		workers:   workers,
 		now:       time.Now,
 		dags:      make(map[string]*cx.DAG),
-		allocator: sliceAllocator{},
+		allocator: mining.GoHeapMemory{},
 	}, nil
 }
 
@@ -176,27 +164,6 @@ func (v *Validator) InsertBlock(store chain.Store, block types.Block) (*big.Int,
 		return totalWork, true, nil
 	}
 	return totalWork, false, nil
-}
-
-func (v *Validator) SealBlock(block types.Block, maxNonces uint64) (types.Block, cx.MineResult, error) {
-	dag, err := v.dagForHeader(block.Header)
-	if err != nil {
-		return types.Block{}, cx.MineResult{}, err
-	}
-	miner, err := cx.NewMiner(v.config.Spec, dag, v.workers, v.backend)
-	if err != nil {
-		return types.Block{}, cx.MineResult{}, err
-	}
-	res, ok := miner.Mine(block.Header.EncodeForMining(), block.Header.Target, cx.NewUint64Nonce(0), maxNonces)
-	if !ok {
-		return types.Block{}, cx.MineResult{}, fmt.Errorf("no solution found in %d nonces", maxNonces)
-	}
-	nonce, ok := res.Nonce.(cx.Uint64Nonce)
-	if !ok {
-		return types.Block{}, cx.MineResult{}, errors.New("unexpected nonce type")
-	}
-	block.Header.Nonce = nonce.Uint64()
-	return block, res, nil
 }
 
 func (v *Validator) Close() error {
