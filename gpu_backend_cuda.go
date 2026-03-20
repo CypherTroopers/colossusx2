@@ -50,7 +50,7 @@ type CUDAHashBackend struct {
 
 func (b *CUDAHashBackend) Mode() BackendMode { return BackendGPU }
 func (b *CUDAHashBackend) Description() string {
-	return "cuda backend with shared-memory-first execution that hashes directly from the canonical cuda-managed DAG allocation and only falls back to the validated host reference path when needed"
+	return "cuda backend with shared-memory-first validation semantics that reads from the canonical cuda-managed DAG allocation on the host and does not claim device-kernel execution"
 }
 func (b *CUDAHashBackend) InitializeRuntime() error {
 	if b.runtime == nil {
@@ -126,3 +126,7 @@ func (b *CUDAHashBackend) HashBatch(header []byte, startNonce cx.Nonce, count ui
 	return results, nil
 }
 func (b *CUDAHashBackend) ExecutionPlan() GPUExecutionPlan { return b.lastPlan }
+
+func NewGPUBackend() (HashBackend, error) {
+	return &CUDAHashBackend{}, nil
+}
