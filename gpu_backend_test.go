@@ -61,6 +61,30 @@ func (b *fakeGPUBackend) HashBatch(header []byte, startNonce cx.Nonce, count uin
 	return results, nil
 }
 
+type recordingSharedKernel struct {
+	spec          Spec
+	calls         int
+	lastPtr       uintptr
+	lastByteLen   uint64
+	lastNodeCount uint64
+}
+
+func (k *recordingSharedKernel) HashBatchShared(header []byte, startNonce cx.Nonce, count uint64, dag rawContiguousDAGBuffer) ([]HashResult, error) {
+	k.calls++
+	k.lastPtr = uintptr(dag.Ptr)
+	k.lastByteLen = dag.ByteLen
+	k.lastNodeCount = dag.NodeCount
+	results := make([]HashResult, 0, count)
+	for i := uint64(0); i < count; i++ {
+		nonce, ok := startNonce.AddUint64(i)
+		if !ok {
+			break
+		}
+		results = append(results, latticeHashSharedBuffer(k.spec, header, nonce, dag))
+	}
+	return results, nil
+}
+
 type fakeOpenCLRuntime struct {
 	initErr     error
 	available   bool
@@ -176,11 +200,12 @@ func TestSuccessfulGPURunAvoidsNormalFallback(t *testing.T) {
 	}
 }
 
-func TestOpenCLDispatcherHostReferencePlanSemantics(t *testing.T) {
+func TestOpenCLDispatcherSharedMemoryDeviceExecutionPlanSemantics(t *testing.T) {
 	dag := testResearchDAG(t)
 	defer dag.Close()
 	runtime := &fakeOpenCLRuntime{available: true, svm: true}
-	dispatcher := &openclDispatcher{runtime: runtime}
+	sharedKernel := &recordingSharedKernel{spec: dag.Spec()}
+	dispatcher := &openclDispatcher{runtime: runtime, sharedKernel: sharedKernel}
 	cfg := gpuKernelConfig{WorkgroupSize: 64, BatchNonces: 4, Source: openclKernelSource, VerifierPct: 100}
 	if err := dispatcher.Prepare(dag, cfg); err != nil {
 		t.Fatalf("Prepare: %v", err)
@@ -193,14 +218,17 @@ func TestOpenCLDispatcherHostReferencePlanSemantics(t *testing.T) {
 		t.Fatalf("expected 3 hashes, got %d", len(result.Hashes))
 	}
 	plan := result.Plan
-	if !plan.UsedFallback {
-		t.Fatal("expected host-reference dispatch to report UsedFallback=true")
+	if plan.UsedFallback {
+		t.Fatal("expected SVM-backed shared execution to avoid fallback")
 	}
-	if plan.ExecutionPath != GPUExecutionPathHostReference {
-		t.Fatalf("expected host-reference execution path, got %q", plan.ExecutionPath)
+	if plan.ExecutionPath != GPUExecutionPathDeviceKernel {
+		t.Fatalf("expected device-kernel execution path, got %q", plan.ExecutionPath)
 	}
-	if plan.ExecutionBackend != "cpu-reference" {
-		t.Fatalf("expected cpu-reference execution backend, got %q", plan.ExecutionBackend)
+	if plan.ExecutionBackend != "opencl" {
+		t.Fatalf("expected opencl execution backend, got %q", plan.ExecutionBackend)
+	}
+	if !plan.DeviceDispatchAttempted {
+		t.Fatal("expected shared-memory device execution to attempt device dispatch")
 	}
 	if plan.CopiedDAG || plan.DeviceDAGCopyPerformed {
 		t.Fatalf("expected no device DAG copy, got CopiedDAG=%v DeviceDAGCopyPerformed=%v", plan.CopiedDAG, plan.DeviceDAGCopyPerformed)
@@ -210,6 +238,16 @@ func TestOpenCLDispatcherHostReferencePlanSemantics(t *testing.T) {
 	}
 	if runtime.setCtxCalls == 0 {
 		t.Fatal("expected Prepare to wire buildOpenCLProgram output back into the runtime context")
+	}
+	if sharedKernel.calls != 1 {
+		t.Fatalf("expected shared kernel to be called once, got %d", sharedKernel.calls)
+	}
+	raw, err := newRawContiguousDAGBuffer(dag)
+	if err != nil {
+		t.Fatalf("newRawContiguousDAGBuffer: %v", err)
+	}
+	if sharedKernel.lastPtr != uintptr(raw.Ptr) {
+		t.Fatal("expected shared kernel to receive the canonical contiguous DAG allocation")
 	}
 }
 
@@ -229,5 +267,40 @@ func TestGPUBackendPrepareFailsHardWhenRuntimeUnavailable(t *testing.T) {
 	}
 	if plan.ExecutionPath != GPUExecutionPathHostReference {
 		t.Fatalf("expected host-reference execution path on failure, got %q", plan.ExecutionPath)
+	}
+}
+
+func TestOpenCLDispatcherFallsBackToHostReferenceWithoutSVM(t *testing.T) {
+	dag := testResearchDAG(t)
+	defer dag.Close()
+	runtime := &fakeOpenCLRuntime{available: true, svm: false}
+	sharedKernel := &recordingSharedKernel{spec: dag.Spec()}
+	dispatcher := &openclDispatcher{runtime: runtime, sharedKernel: sharedKernel}
+	cfg := gpuKernelConfig{WorkgroupSize: 64, BatchNonces: 4, Source: openclKernelSource, VerifierPct: 100}
+	if err := dispatcher.Prepare(dag, cfg); err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+	result, err := dispatcher.Dispatch([]byte("header"), cx.NewUint64Nonce(10), 3, dag)
+	if err != nil {
+		t.Fatalf("Dispatch: %v", err)
+	}
+	if len(result.Hashes) != 3 {
+		t.Fatalf("expected 3 hashes, got %d", len(result.Hashes))
+	}
+	plan := result.Plan
+	if !plan.UsedFallback {
+		t.Fatal("expected non-SVM dispatch to remain on host-reference fallback")
+	}
+	if plan.ExecutionPath != GPUExecutionPathHostReference {
+		t.Fatalf("expected host-reference execution path, got %q", plan.ExecutionPath)
+	}
+	if plan.ExecutionBackend != "cpu-reference" {
+		t.Fatalf("expected cpu-reference execution backend, got %q", plan.ExecutionBackend)
+	}
+	if plan.CopiedDAG || plan.DeviceDAGCopyPerformed {
+		t.Fatalf("expected no DAG copy on host-reference validation path, got CopiedDAG=%v DeviceDAGCopyPerformed=%v", plan.CopiedDAG, plan.DeviceDAGCopyPerformed)
+	}
+	if sharedKernel.calls != 0 {
+		t.Fatalf("expected shared kernel to stay unused without SVM, got %d calls", sharedKernel.calls)
 	}
 }
