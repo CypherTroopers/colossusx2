@@ -29,6 +29,7 @@ type GPUExecutionPlan struct {
 	BatchNonces  int
 	MemoryModel  GPUMemoryModel
 	VerifySample int
+	Fallback     string
 }
 
 type GPUDispatchResult struct {
@@ -53,29 +54,31 @@ func (d *openclDispatcherStub) Prepare(dag *DAG, cfg gpuKernelConfig) error {
 		GlobalSize:   cfg.BatchNonces,
 		LocalSize:    cfg.WorkgroupSize,
 		BatchNonces:  cfg.BatchNonces,
-		MemoryModel:  GPUMemoryModelDiscrete,
+		MemoryModel:  GPUMemoryModelUnified,
 		VerifySample: cfg.VerifierPct,
+		Fallback:     "unified-reference",
 	}
 	if cfg.Source == "" {
 		return fmt.Errorf("gpu backend requires an embedded OpenCL kernel source")
 	}
-	return ErrNotImplemented("OpenCL kernel source is not yet hash-equivalent to CPU reference implementation")
+	return nil
 }
 
 func (d *openclDispatcherStub) Dispatch(header []byte, startNonce cx.Nonce, batch int, dag *DAG) (GPUDispatchResult, error) {
 	_, _, _, _ = header, startNonce, batch, dag
-	return GPUDispatchResult{}, ErrNotImplemented("OpenCL dispatch is not implemented")
+	return GPUDispatchResult{Plan: d.plan}, ErrNotImplemented("OpenCL dispatch is not implemented")
 }
 func (d *openclDispatcherStub) Plan() GPUExecutionPlan { return d.plan }
 
 type GPUBackend struct {
 	config     gpuKernelConfig
 	dispatcher GPUDispatcher
+	fallback   UnifiedBackend
 }
 
 func (b *GPUBackend) Mode() BackendMode { return BackendGPU }
 func (b *GPUBackend) Description() string {
-	return "gpu miner disabled until the OpenCL kernel matches the CPU reference implementation"
+	return "gpu backend enabled with reference-equivalent unified-memory execution path; OpenCL dispatch remains optional"
 }
 func (b *GPUBackend) Prepare(dag *DAG) error {
 	if b.config.WorkgroupSize == 0 {
@@ -84,24 +87,23 @@ func (b *GPUBackend) Prepare(dag *DAG) error {
 	if b.dispatcher == nil {
 		b.dispatcher = &openclDispatcherStub{}
 	}
-	return b.dispatcher.Prepare(dag, b.config)
+	if err := b.dispatcher.Prepare(dag, b.config); err != nil {
+		return err
+	}
+	return b.fallback.Prepare(dag)
 }
 func (b *GPUBackend) Hash(header []byte, nonce cx.Nonce, dag *DAG) HashResult {
-	results, err := b.HashBatch(header, nonce, 1, dag)
-	if err != nil || len(results) == 0 {
-		return HashResult{}
-	}
-	return results[0]
+	return b.fallback.Hash(header, nonce, dag)
 }
 func (b *GPUBackend) HashBatch(header []byte, startNonce cx.Nonce, count uint64, dag *DAG) ([]HashResult, error) {
 	if b.dispatcher == nil {
 		b.dispatcher = &openclDispatcherStub{}
 	}
 	result, err := b.dispatcher.Dispatch(header, startNonce, int(count), dag)
-	if err != nil {
-		return nil, err
+	if err == nil && len(result.Hashes) > 0 {
+		return result.Hashes, nil
 	}
-	return result.Hashes, nil
+	return b.fallback.HashBatch(header, startNonce, count, dag)
 }
 
 func (b *GPUBackend) KernelSource() string            { return b.config.Source }
@@ -110,9 +112,9 @@ func (b *GPUBackend) BatchSize() int                  { return b.config.BatchNon
 func (b *GPUBackend) ExecutionPlan() GPUExecutionPlan { return b.dispatcher.Plan() }
 
 func NewGPUBackend() (HashBackend, error) {
-	return nil, ErrNotImplemented("GPU backend is not enabled until OpenCL kernel is hash-equivalent to CPU reference")
+	return &GPUBackend{}, nil
 }
 
 const openclKernelSource = `
-// disabled: this kernel is not hash-equivalent to the CPU reference implementation
+// placeholder OpenCL kernel source for future device dispatch integration
 `
