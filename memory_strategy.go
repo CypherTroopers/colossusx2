@@ -1,4 +1,4 @@
-package main
+package miner
 
 import (
 	"fmt"
@@ -112,8 +112,12 @@ type notImplementedError string
 func (e notImplementedError) Error() string { return "not implemented: " + string(e) }
 func ErrNotImplemented(s string) error      { return notImplementedError(s) }
 
+func ResolveDAGStrategy(backend BackendMode, runtime runtimeState, dagAlloc string) (MemoryStrategy, error) {
+	return dagStrategyResolver{backend: backend, runtime: runtime}.Resolve(dagAlloc)
+}
+
 func selectDAGStrategy(backend BackendMode, dagAlloc string) (MemoryStrategy, error) {
-	return dagStrategyResolver{backend: backend}.Resolve(dagAlloc)
+	return ResolveDAGStrategy(backend, nil, dagAlloc)
 }
 
 func (r dagStrategyResolver) Resolve(dagAlloc string) (MemoryStrategy, error) {

@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	miner "colossusx"
 	cx "colossusx/colossusx"
 	"colossusx/pkg/chain"
 	"colossusx/pkg/consensus"
@@ -35,20 +36,31 @@ func main() {
 		}
 	}()
 
+	miningBackend, strategy, runtimeStatus, err := initializeMining(cfg)
+	if err != nil {
+		log.Fatal(err)
+	}
+	validator.SetMiningBackend(miningBackend, strategy)
+
 	store, err := chain.NewDiskStore(cfg.DataDir)
 	if err != nil {
 		log.Fatal(err)
 	}
 
 	n, err := node.New(node.Config{
-		Chain:      cfg.Chain,
-		Genesis:    cfg.Genesis,
-		Mine:       cfg.Mine,
-		MaxNonces:  cfg.MaxNonces,
-		BlockTime:  cfg.BlockTime,
-		NodeID:     cfg.NodeID,
-		ListenAddr: cfg.ListenAddr,
-		Bootnodes:  cfg.Bootnodes,
+		Chain:              cfg.Chain,
+		Genesis:            cfg.Genesis,
+		Mine:               cfg.Mine,
+		MaxNonces:          cfg.MaxNonces,
+		BlockTime:          cfg.BlockTime,
+		NodeID:             cfg.NodeID,
+		ListenAddr:         cfg.ListenAddr,
+		Bootnodes:          cfg.Bootnodes,
+		MinerBackend:       string(cfg.MinerBackend),
+		MinerDAGAlloc:      cfg.MinerDAGAlloc,
+		ResolvedDAGAlloc:   strategy.Name(),
+		RuntimeInitStatus:  runtimeStatus,
+		MinerExecutionPath: miningBackend.Description(),
 	}, validator, store)
 	if err != nil {
 		log.Fatal(err)
@@ -57,23 +69,25 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	fmt.Printf("colossusd starting network=%s mode=%s dag=%dMiB workers=%d mine=%t datadir=%s listen=%s bootnodes=%d node_id=%s\n", cfg.Chain.NetworkID, cfg.Chain.Spec.Mode, cfg.Chain.Spec.DAGSizeBytes/(1024*1024), cfg.Workers, cfg.Mine, cfg.DataDir, cfg.ListenAddr, len(cfg.Bootnodes), cfg.NodeID)
+	fmt.Printf("colossusd starting network=%s mode=%s dag=%dMiB workers=%d mine=%t datadir=%s listen=%s bootnodes=%d node_id=%s miner_backend=%s miner_dag_alloc=%s resolved_alloc=%s runtime_init=%s execution=%s\n", cfg.Chain.NetworkID, cfg.Chain.Spec.Mode, cfg.Chain.Spec.DAGSizeBytes/(1024*1024), cfg.Workers, cfg.Mine, cfg.DataDir, cfg.ListenAddr, len(cfg.Bootnodes), cfg.NodeID, cfg.MinerBackend, cfg.MinerDAGAlloc, strategy.Name(), runtimeStatus, miningBackend.Description())
 	if err := n.Run(ctx); err != nil && err != context.Canceled {
 		log.Fatal(err)
 	}
 }
 
 type config struct {
-	Chain      types.ChainConfig
-	Genesis    types.GenesisConfig
-	Mine       bool
-	Workers    int
-	MaxNonces  uint64
-	BlockTime  time.Duration
-	DataDir    string
-	ListenAddr string
-	Bootnodes  []string
-	NodeID     string
+	Chain         types.ChainConfig
+	Genesis       types.GenesisConfig
+	Mine          bool
+	Workers       int
+	MaxNonces     uint64
+	BlockTime     time.Duration
+	DataDir       string
+	ListenAddr    string
+	Bootnodes     []string
+	NodeID        string
+	MinerBackend  miner.BackendMode
+	MinerDAGAlloc string
 }
 
 func parseFlags() (config, error) {
@@ -94,6 +108,8 @@ func parseFlags() (config, error) {
 	bootnodes := fs.String("bootnodes", "", "comma-separated bootnode addresses")
 	nodeID := fs.String("node-id", "", "stable node identifier")
 	targetHex := fs.String("target", "0fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", "mining target in hex")
+	minerBackend := fs.String("miner-backend", string(miner.BackendUnified), "mining backend: unified, cpu, or gpu")
+	minerDAGAlloc := fs.String("miner-dag-alloc", "auto", "mining DAG allocation strategy: auto, go-heap, pinned-host, cuda-managed, opencl-svm")
 	rpcListen := fs.String("rpc-listen", "", "reserved for future RPC listener")
 	_ = rpcListen
 	if err := fs.Parse(os.Args[1:]); err != nil {
@@ -117,6 +133,10 @@ func parseFlags() (config, error) {
 	if err != nil {
 		return config{}, err
 	}
+	backendMode, err := miner.ParseBackendMode(*minerBackend)
+	if err != nil {
+		return config{}, err
+	}
 	if *noMine {
 		*mine = false
 	}
@@ -129,5 +149,25 @@ func parseFlags() (config, error) {
 		Spec:      spec,
 		ExtraData: fmt.Sprintf("mode=%s", spec.Mode),
 	}
-	return config{Chain: chainCfg, Genesis: genesis, Mine: *mine, Workers: *workers, MaxNonces: *maxNonces, BlockTime: *blockTime, DataDir: *dataDir, ListenAddr: *listenAddr, Bootnodes: node.ParseBootnodes(*bootnodes), NodeID: *nodeID}, nil
+	return config{Chain: chainCfg, Genesis: genesis, Mine: *mine, Workers: *workers, MaxNonces: *maxNonces, BlockTime: *blockTime, DataDir: *dataDir, ListenAddr: *listenAddr, Bootnodes: node.ParseBootnodes(*bootnodes), NodeID: *nodeID, MinerBackend: backendMode, MinerDAGAlloc: *minerDAGAlloc}, nil
+}
+
+func initializeMining(cfg config) (cx.HashBackend, miner.MemoryStrategy, string, error) {
+	backend, err := miner.NewBackend(cfg.MinerBackend)
+	if err != nil {
+		return nil, nil, "failed", err
+	}
+	runtimeState, err := miner.InitializeBackendRuntime(backend)
+	if err != nil {
+		return nil, nil, "failed", err
+	}
+	status := "not-required"
+	if runtimeState != nil {
+		status = "ok"
+	}
+	strategy, err := miner.ResolveDAGStrategy(cfg.MinerBackend, runtimeState, cfg.MinerDAGAlloc)
+	if err != nil {
+		return nil, nil, status, err
+	}
+	return backend, strategy, status, nil
 }

@@ -1,4 +1,4 @@
-package main
+package miner
 
 import (
 	"encoding/hex"
@@ -40,35 +40,39 @@ type runtimeBackend interface {
 	InitializeRuntime() error
 }
 
-type cliConfig struct {
-	mode       cx.Mode
-	backend    BackendMode
-	dagAlloc   string
-	spec       Spec
-	workers    int
-	header     []byte
-	epochSeed  []byte
-	target     Target
-	startNonce uint64
-	maxNonces  uint64
-	benchOnly  bool
+type CLIConfig struct {
+	Mode       cx.Mode
+	Backend    BackendMode
+	DAGAlloc   string
+	Spec       Spec
+	Workers    int
+	Header     []byte
+	EpochSeed  []byte
+	Target     Target
+	StartNonce uint64
+	MaxNonces  uint64
+	BenchOnly  bool
+}
+
+func Main(args []string) error {
+	cfg, err := ParseCLIConfig(args)
+	if err != nil {
+		return err
+	}
+	backend, err := NewBackend(cfg.Backend)
+	if err != nil {
+		return err
+	}
+	return Run(cfg, backend)
 }
 
 func main() {
-	cfg, err := parseCLIConfig(os.Args[1:])
-	if err != nil {
-		log.Fatal(err)
-	}
-	backend, err := newBackend(cfg.backend)
-	if err != nil {
-		log.Fatal(err)
-	}
-	if err := run(cfg, backend); err != nil {
+	if err := Main(os.Args[1:]); err != nil {
 		log.Fatal(err)
 	}
 }
 
-func parseCLIConfig(args []string) (cliConfig, error) {
+func ParseCLIConfig(args []string) (CLIConfig, error) {
 	fs := flag.NewFlagSet("colossusx", flag.ContinueOnError)
 	fs.SetOutput(os.Stdout)
 
@@ -88,56 +92,56 @@ func parseCLIConfig(args []string) (cliConfig, error) {
 		benchOnly    = fs.Bool("bench", false, "benchmark hash loop only")
 	)
 	if err := fs.Parse(args); err != nil {
-		return cliConfig{}, err
+		return CLIConfig{}, err
 	}
 
 	mode, err := parseMode(*modeName)
 	if err != nil {
-		return cliConfig{}, err
+		return CLIConfig{}, err
 	}
-	backend, err := parseBackendMode(*backendName)
+	backend, err := ParseBackendMode(*backendName)
 	if err != nil {
-		return cliConfig{}, err
+		return CLIConfig{}, err
 	}
 	spec := cx.ResearchSpec((*dagMiB)*1024*1024, *reads, *epochBlocks)
 	if mode == cx.ModeStrict {
 		spec = cx.StrictSpec()
 		if (*dagMiB)*1024*1024 != cx.StrictDAGSizeBytes || *reads != cx.StrictReadsPerHash || *epochBlocks != cx.StrictEpochBlocks {
-			return cliConfig{}, fmt.Errorf("strict mode does not allow overriding DAG, reads, or epoch constants")
+			return CLIConfig{}, fmt.Errorf("strict mode does not allow overriding DAG, reads, or epoch constants")
 		}
 	}
 	if err := spec.Validate(); err != nil {
-		return cliConfig{}, err
+		return CLIConfig{}, err
 	}
 
 	header, err := hex.DecodeString(*headerHex)
 	if err != nil {
-		return cliConfig{}, fmt.Errorf("invalid header hex: %w", err)
+		return CLIConfig{}, fmt.Errorf("invalid header hex: %w", err)
 	}
 	epochSeed, err := hex.DecodeString(*epochSeedHex)
 	if err != nil {
-		return cliConfig{}, fmt.Errorf("invalid epoch-seed hex: %w", err)
+		return CLIConfig{}, fmt.Errorf("invalid epoch-seed hex: %w", err)
 	}
 	target, err := cx.ParseTargetHex(*targetHex)
 	if err != nil {
-		return cliConfig{}, fmt.Errorf("invalid target: %w", err)
+		return CLIConfig{}, fmt.Errorf("invalid target: %w", err)
 	}
 
-	return cliConfig{mode: mode, backend: backend, dagAlloc: *dagAlloc, spec: spec, workers: *workers, header: header, epochSeed: epochSeed, target: target, startNonce: *startNonce, maxNonces: *maxNonces, benchOnly: *benchOnly}, nil
+	return CLIConfig{Mode: mode, Backend: backend, DAGAlloc: *dagAlloc, Spec: spec, Workers: *workers, Header: header, EpochSeed: epochSeed, Target: target, StartNonce: *startNonce, MaxNonces: *maxNonces, BenchOnly: *benchOnly}, nil
 }
 
-func run(cfg cliConfig, backend HashBackend) error {
-	rb, err := initializeBackendRuntime(backend)
+func Run(cfg CLIConfig, backend HashBackend) error {
+	rb, err := InitializeBackendRuntime(backend)
 	if err != nil {
 		return err
 	}
-	strategy, err := dagStrategyResolver{backend: cfg.backend, runtime: rb}.Resolve(cfg.dagAlloc)
+	strategy, err := ResolveDAGStrategy(cfg.Backend, rb, cfg.DAGAlloc)
 	if err != nil {
 		return err
 	}
-	printConfig(cfg, backend, strategy)
+	PrintConfig(cfg, backend, strategy)
 
-	dag, err := cx.NewDAGWithAllocator(cfg.spec, strategy)
+	dag, err := cx.NewDAGWithAllocator(cfg.Spec, strategy)
 	if err != nil {
 		return err
 	}
@@ -147,7 +151,7 @@ func run(cfg cliConfig, backend HashBackend) error {
 		}
 	}()
 
-	if err := cx.PopulateDAG(dag, cfg.epochSeed, cfg.workers); err != nil {
+	if err := cx.PopulateDAG(dag, cfg.EpochSeed, cfg.Workers); err != nil {
 		return fmt.Errorf("generate dag: %w", err)
 	}
 	fmt.Println("dag generated")
@@ -156,12 +160,12 @@ func run(cfg cliConfig, backend HashBackend) error {
 		return err
 	}
 
-	miner, err := cx.NewMiner(cfg.spec, dag, cfg.workers, skipPrepareBackend{backend})
+	miner, err := cx.NewMiner(cfg.Spec, dag, cfg.Workers, skipPrepareBackend{backend})
 	if err != nil {
 		return err
 	}
-	if cfg.benchOnly {
-		res := cx.Benchmark(miner, cfg.header, cx.NewUint64Nonce(cfg.startNonce), cfg.maxNonces)
+	if cfg.BenchOnly {
+		res := cx.Benchmark(miner, cfg.Header, cx.NewUint64Nonce(cfg.StartNonce), cfg.MaxNonces)
 		fmt.Println("benchmark complete")
 		fmt.Printf("backend: %s\n", res.Backend)
 		fmt.Printf("hashes: %d\n", res.Hashes)
@@ -170,7 +174,7 @@ func run(cfg cliConfig, backend HashBackend) error {
 		return nil
 	}
 
-	res, ok := miner.Mine(cfg.header, cfg.target, cx.NewUint64Nonce(cfg.startNonce), cfg.maxNonces)
+	res, ok := miner.Mine(cfg.Header, cfg.Target, cx.NewUint64Nonce(cfg.StartNonce), cfg.MaxNonces)
 	if !ok {
 		fmt.Println("no solution found in range")
 		return exitCodeError(1)
@@ -189,7 +193,7 @@ type skipPrepareBackend struct{ HashBackend }
 
 func (b skipPrepareBackend) Prepare(*DAG) error { return nil }
 
-func initializeBackendRuntime(backend HashBackend) (runtimeState, error) {
+func InitializeBackendRuntime(backend HashBackend) (runtimeState, error) {
 	if rb, ok := backend.(runtimeBackend); ok {
 		if err := rb.InitializeRuntime(); err != nil {
 			return nil, err
@@ -199,17 +203,17 @@ func initializeBackendRuntime(backend HashBackend) (runtimeState, error) {
 	return nil, nil
 }
 
-func printConfig(cfg cliConfig, backend HashBackend, strategy MemoryStrategy) {
+func PrintConfig(cfg CLIConfig, backend HashBackend, strategy MemoryStrategy) {
 	fmt.Println("COLOSSUS-X miner")
-	fmt.Printf("mode: %s\n", cfg.mode)
+	fmt.Printf("mode: %s\n", cfg.Mode)
 	fmt.Printf("backend: %s (%s)\n", backend.Mode(), backend.Description())
-	fmt.Printf("dag: %d MiB\n", cfg.spec.DAGSizeBytes/(1024*1024))
-	fmt.Printf("node size: %d bytes\n", cfg.spec.NodeSize)
-	fmt.Printf("node count: %d\n", cfg.spec.NodeCount())
-	fmt.Printf("reads/hash: %d\n", cfg.spec.ReadsPerHash)
-	fmt.Printf("epoch blocks: %d\n", cfg.spec.EpochBlocks)
-	fmt.Printf("workers: %d\n", cfg.workers)
-	fmt.Printf("target: %s\n", cfg.target.String())
+	fmt.Printf("dag: %d MiB\n", cfg.Spec.DAGSizeBytes/(1024*1024))
+	fmt.Printf("node size: %d bytes\n", cfg.Spec.NodeSize)
+	fmt.Printf("node count: %d\n", cfg.Spec.NodeCount())
+	fmt.Printf("reads/hash: %d\n", cfg.Spec.ReadsPerHash)
+	fmt.Printf("epoch blocks: %d\n", cfg.Spec.EpochBlocks)
+	fmt.Printf("workers: %d\n", cfg.Workers)
+	fmt.Printf("target: %s\n", cfg.Target.String())
 	fmt.Printf("dag allocation: %s\n", strategy.Name())
 }
 
@@ -222,7 +226,7 @@ func parseMode(s string) (cx.Mode, error) {
 	}
 }
 
-func parseBackendMode(s string) (BackendMode, error) {
+func ParseBackendMode(s string) (BackendMode, error) {
 	switch BackendMode(s) {
 	case BackendUnified, BackendCPU, BackendGPU:
 		return BackendMode(s), nil
@@ -231,7 +235,7 @@ func parseBackendMode(s string) (BackendMode, error) {
 	}
 }
 
-func newBackend(mode BackendMode) (HashBackend, error) {
+func NewBackend(mode BackendMode) (HashBackend, error) {
 	switch mode {
 	case BackendUnified:
 		return &UnifiedBackend{}, nil

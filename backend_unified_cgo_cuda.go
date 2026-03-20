@@ -1,6 +1,6 @@
 //go:build cgo && cuda
 
-package main
+package miner
 
 /*
 #cgo LDFLAGS: -lcudart

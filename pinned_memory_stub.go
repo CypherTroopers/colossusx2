@@ -1,6 +1,6 @@
 //go:build !cuda || !cgo
 
-package main
+package miner
 
 import cx "colossusx/colossusx"
 

@@ -1,6 +1,6 @@
 //go:build !cuda || !cgo
 
-package main
+package miner
 
 func currentCUDADeviceOrdinal() (int, error) {
 	return 0, ErrNotImplemented("cuda managed memory requires a cgo + cuda build")
