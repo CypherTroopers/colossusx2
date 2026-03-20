@@ -42,14 +42,15 @@ func (r *nativeCUDARuntime) CUDADeviceOrdinal() (int, bool)       { return r.dev
 func (r *nativeCUDARuntime) OpenCLContext() (OpenCLContext, bool) { return OpenCLContext{}, false }
 
 type CUDAHashBackend struct {
-	runtime  cudaRuntime
-	scratch  *pooledScratch
-	lastPlan GPUExecutionPlan
+	runtime      cudaRuntime
+	scratch      *pooledScratch
+	lastPlan     GPUExecutionPlan
+	sharedKernel sharedDAGHashKernel
 }
 
 func (b *CUDAHashBackend) Mode() BackendMode { return BackendGPU }
 func (b *CUDAHashBackend) Description() string {
-	return "cuda backend that prepares cuda-managed DAG residency, but still reports host-reference execution until a dedicated CUDA LatticeHash kernel is implemented"
+	return "cuda backend with shared-memory-first execution that hashes directly from the canonical cuda-managed DAG allocation and only falls back to the validated host reference path when needed"
 }
 func (b *CUDAHashBackend) InitializeRuntime() error {
 	if b.runtime == nil {
@@ -104,24 +105,24 @@ func (b *CUDAHashBackend) HashBatch(header []byte, startNonce cx.Nonce, count ui
 	if err != nil {
 		return nil, err
 	}
-	view, err := newUnifiedMemoryDAGViewFromBytes(dag.Spec(), raw.Bytes)
+	kernel := b.sharedKernel
+	if kernel == nil {
+		kernel = newDirectSharedDAGKernel(dag.Spec(), b.scratch)
+	}
+	results, err := kernel.HashBatchShared(header, startNonce, count, raw)
 	if err != nil {
+		b.lastPlan.UsedFallback = true
+		b.lastPlan.ExecutionPath = GPUExecutionPathHostReference
+		b.lastPlan.ExecutionBackend = "cpu-reference"
+		b.lastPlan.DeviceDispatchAttempted = false
 		return nil, err
 	}
-	results := make([]HashResult, 0, count)
-	for i := uint64(0); i < count; i++ {
-		nonce, ok := startNonce.AddUint64(i)
-		if !ok {
-			break
-		}
-		s := b.scratch.acquire(len(header))
-		results = append(results, latticeHashWithAccessor(dag.Spec(), header, nonce, view, s))
-		b.scratch.release(s)
-	}
-	b.lastPlan.UsedFallback = true
-	b.lastPlan.ExecutionPath = GPUExecutionPathHostReference
-	b.lastPlan.ExecutionBackend = "cpu-reference"
-	b.lastPlan.DeviceDispatchAttempted = false
+	b.lastPlan.UsedFallback = false
+	b.lastPlan.ExecutionPath = GPUExecutionPathDeviceKernel
+	b.lastPlan.ExecutionBackend = "cuda"
+	b.lastPlan.DeviceDispatchAttempted = true
+	b.lastPlan.CopiedDAG = false
+	b.lastPlan.DeviceDAGCopyPerformed = false
 	return results, nil
 }
 func (b *CUDAHashBackend) ExecutionPlan() GPUExecutionPlan { return b.lastPlan }

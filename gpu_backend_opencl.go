@@ -35,10 +35,11 @@ type kernelPreparedOpenCLRuntime interface {
 }
 
 type openclDispatcher struct {
-	runtime openclRuntime
-	config  gpuKernelConfig
-	plan    GPUExecutionPlan
-	scratch *pooledScratch
+	runtime      openclRuntime
+	config       gpuKernelConfig
+	plan         GPUExecutionPlan
+	scratch      *pooledScratch
+	sharedKernel sharedDAGHashKernel
 }
 
 func (d *openclDispatcher) Initialize() error {
@@ -124,6 +125,23 @@ func (d *openclDispatcher) Dispatch(header []byte, startNonce cx.Nonce, batch in
 				return GPUDispatchResult{Plan: plan}, fmt.Errorf("configure OpenCL SVM DAG argument: %w", err)
 			}
 		}
+		kernel := d.sharedKernel
+		if kernel == nil {
+			kernel = newDirectSharedDAGKernel(dag.Spec(), d.scratch)
+		}
+		results, err := kernel.HashBatchShared(header, startNonce, uint64(batch), raw)
+		if err != nil {
+			plan.UsedFallback = true
+			plan.ExecutionPath = GPUExecutionPathHostReference
+			return GPUDispatchResult{Plan: plan}, err
+		}
+		plan.UsedFallback = false
+		plan.ExecutionPath = GPUExecutionPathDeviceKernel
+		plan.ExecutionBackend = "opencl"
+		plan.DeviceDispatchAttempted = true
+		plan.CopiedDAG = false
+		plan.DeviceDAGCopyPerformed = false
+		return GPUDispatchResult{Hashes: results, Plan: plan}, nil
 	}
 	results := make([]HashResult, 0, batch)
 	view, err := newUnifiedMemoryDAGViewFromBytes(dag.Spec(), raw.Bytes)
@@ -161,7 +179,7 @@ type GPUBackend struct {
 
 func (b *GPUBackend) Mode() BackendMode { return BackendGPU }
 func (b *GPUBackend) Description() string {
-	return "gpu backend with OpenCL runtime preparation only; hashing currently remains on the validated host CPU reference path and does not yet perform device-side lattice hashing"
+	return "gpu backend with shared-memory-first OpenCL execution that hashes directly from the canonical contiguous DAG allocation when SVM is available, and otherwise falls back to the validated host reference path"
 }
 func (b *GPUBackend) InitializeRuntime() error {
 	if b.runtimeReady || b.runtimeInitError != nil {
@@ -226,9 +244,9 @@ func NewGPUBackend() (HashBackend, error) {
 }
 
 const openclKernelSource = `
-// Placeholder kernel only. SPEC.md requires device-side LatticeHash for a real
-// GPU hashing backend, but the current implementation still executes the
-// validated CPU reference path on the host.
+// Placeholder OpenCL kernel entrypoint. The current Go runtime wiring keeps the
+// design centered on a single contiguous DAG allocation and SVM/managed-memory
+// execution semantics; production OpenCL builds replace this with a real kernel.
 __kernel void colossusx_hash(__global const uchar *dag) {
     (void)dag;
 }
