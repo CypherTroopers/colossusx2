@@ -34,6 +34,12 @@ type Miner = cx.Miner
 type MineResult = cx.MineResult
 type HashBackend = cx.HashBackend
 
+type runtimeBackend interface {
+	HashBackend
+	runtimeState
+	InitializeRuntime() error
+}
+
 type cliConfig struct {
 	mode       cx.Mode
 	backend    BackendMode
@@ -57,11 +63,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	strategy, err := selectDAGStrategy(cfg.backend, cfg.dagAlloc)
-	if err != nil {
-		log.Fatal(err)
-	}
-	if err := run(cfg, backend, strategy); err != nil {
+	if err := run(cfg, backend); err != nil {
 		log.Fatal(err)
 	}
 }
@@ -124,7 +126,15 @@ func parseCLIConfig(args []string) (cliConfig, error) {
 	return cliConfig{mode: mode, backend: backend, dagAlloc: *dagAlloc, spec: spec, workers: *workers, header: header, epochSeed: epochSeed, target: target, startNonce: *startNonce, maxNonces: *maxNonces, benchOnly: *benchOnly}, nil
 }
 
-func run(cfg cliConfig, backend HashBackend, strategy MemoryStrategy) error {
+func run(cfg cliConfig, backend HashBackend) error {
+	rb, err := initializeBackendRuntime(backend)
+	if err != nil {
+		return err
+	}
+	strategy, err := dagStrategyResolver{backend: cfg.backend, runtime: rb}.Resolve(cfg.dagAlloc)
+	if err != nil {
+		return err
+	}
 	printConfig(cfg, backend, strategy)
 
 	dag, err := cx.NewDAGWithAllocator(cfg.spec, strategy)
@@ -142,7 +152,11 @@ func run(cfg cliConfig, backend HashBackend, strategy MemoryStrategy) error {
 	}
 	fmt.Println("dag generated")
 
-	miner, err := cx.NewMiner(cfg.spec, dag, cfg.workers, backend)
+	if err := backend.Prepare(dag); err != nil {
+		return err
+	}
+
+	miner, err := cx.NewMiner(cfg.spec, dag, cfg.workers, skipPrepareBackend{backend})
 	if err != nil {
 		return err
 	}
@@ -169,6 +183,20 @@ func run(cfg cliConfig, backend HashBackend, strategy MemoryStrategy) error {
 	fmt.Printf("hashes: %d\n", res.Hashes)
 	fmt.Printf("hashrate: %.2f H/s\n", res.HashRate)
 	return nil
+}
+
+type skipPrepareBackend struct{ HashBackend }
+
+func (b skipPrepareBackend) Prepare(*DAG) error { return nil }
+
+func initializeBackendRuntime(backend HashBackend) (runtimeState, error) {
+	if rb, ok := backend.(runtimeBackend); ok {
+		if err := rb.InitializeRuntime(); err != nil {
+			return nil, err
+		}
+		return rb, nil
+	}
+	return nil, nil
 }
 
 func printConfig(cfg cliConfig, backend HashBackend, strategy MemoryStrategy) {

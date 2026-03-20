@@ -109,3 +109,18 @@ func TestCPUBackendCopiesPreparedDAG(t *testing.T) {
 		t.Fatal("expected prepared CPU backend to keep using its own copied DAG")
 	}
 }
+
+func TestRunInitializesBackendRuntimeBeforeResolvingAllocator(t *testing.T) {
+	spec := Spec{Mode: cx.ModeResearch, DAGSizeBytes: 64 * 64, NodeSize: DefaultNodeSize, ReadsPerHash: 4, EpochBlocks: DefaultEpochBlocks}
+	cfg := cliConfig{mode: cx.ModeResearch, backend: BackendGPU, dagAlloc: "auto", spec: spec, workers: 1, header: []byte("01"), epochSeed: []byte("seedseedseedseedseedseedseedseed"), target: cx.Target{}, maxNonces: 1, benchOnly: true}
+	backend := &fakeGPUBackend{}
+	if err := run(cfg, backend); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if !backend.runtimeCalled {
+		t.Fatal("expected run to initialize backend runtime before allocator resolution")
+	}
+	if !backend.prepared {
+		t.Fatal("expected run to prepare backend after dag allocation/population")
+	}
+}

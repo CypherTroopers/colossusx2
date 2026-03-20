@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"sync"
+	"unsafe"
 
 	cx "colossusx/colossusx"
 )
@@ -23,6 +24,38 @@ type contiguousDAGView struct{ dag *DAG }
 func (v contiguousDAGView) NodeCount() uint64                { return v.dag.NodeCount() }
 func (v contiguousDAGView) ReadNode(i uint64, out *[64]byte) { v.dag.ReadNode(i, out) }
 
+type rawContiguousDAGBuffer struct {
+	Ptr       unsafe.Pointer
+	Bytes     []byte
+	ByteLen   uint64
+	NodeSize  uint64
+	NodeCount uint64
+}
+
+func newRawContiguousDAGBuffer(dag *DAG) (rawContiguousDAGBuffer, error) {
+	if dag == nil {
+		return rawContiguousDAGBuffer{}, ErrNilDAG
+	}
+	buf := dag.Bytes()
+	if uint64(len(buf)) < dag.Spec().DAGSizeBytes {
+		return rawContiguousDAGBuffer{}, errors.New("managed allocation is smaller than the DAG")
+	}
+	var ptr unsafe.Pointer
+	if len(buf) > 0 {
+		ptr = unsafe.Pointer(unsafe.SliceData(buf))
+	}
+	return rawContiguousDAGBuffer{
+		Ptr:       ptr,
+		Bytes:     buf[:dag.Spec().DAGSizeBytes],
+		ByteLen:   dag.Spec().DAGSizeBytes,
+		NodeSize:  dag.Spec().NodeSize,
+		NodeCount: dag.NodeCount(),
+	}, nil
+}
+
+// unifiedMemoryDAGView is the CPU reference hashing view for allocations that are
+// already contiguous in host-visible memory; true GPU zero-copy/shared-memory paths
+// use rawContiguousDAGBuffer directly instead.
 type unifiedMemoryDAGView struct {
 	buf       []byte
 	nodeSize  uint64

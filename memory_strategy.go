@@ -13,6 +13,16 @@ type MemoryStrategy interface {
 	cx.Allocator
 }
 
+type runtimeState interface {
+	CUDADeviceOrdinal() (int, bool)
+	OpenCLContext() (OpenCLContext, bool)
+}
+
+type dagStrategyResolver struct {
+	backend BackendMode
+	runtime runtimeState
+}
+
 type fallbackMemoryStrategy struct {
 	name       string
 	strategies []MemoryStrategy
@@ -73,10 +83,16 @@ func (PinnedMemory) Alloc(size uint64) (cx.Allocation, error) {
 }
 func (PinnedMemory) Name() string { return "pinned-host" }
 
-type CUDAManagedMemory struct{}
+type CUDAManagedMemory struct {
+	DeviceOrdinal int
+	Ready         bool
+}
 
 func (m CUDAManagedMemory) Alloc(size uint64) (cx.Allocation, error) {
-	return allocCUDAManaged(size)
+	if !m.Ready {
+		return nil, fmt.Errorf("cuda managed allocation requires initialized runtime/device")
+	}
+	return allocCUDAManaged(m.DeviceOrdinal, size)
 }
 func (CUDAManagedMemory) Name() string { return "cuda-managed" }
 
@@ -85,6 +101,9 @@ type OpenCLSVM struct {
 }
 
 func (m OpenCLSVM) Alloc(size uint64) (cx.Allocation, error) {
+	if !m.Context.valid() {
+		return nil, fmt.Errorf("opencl svm requires a live OpenCL context and device")
+	}
 	return allocOpenCLSVM(m.Context, size)
 }
 func (OpenCLSVM) Name() string { return "opencl-svm" }
@@ -95,24 +114,16 @@ func (e notImplementedError) Error() string { return "not implemented: " + strin
 func ErrNotImplemented(s string) error      { return notImplementedError(s) }
 
 func selectDAGStrategy(backend BackendMode, dagAlloc string) (MemoryStrategy, error) {
+	return dagStrategyResolver{backend: backend}.Resolve(dagAlloc)
+}
+
+func (r dagStrategyResolver) Resolve(dagAlloc string) (MemoryStrategy, error) {
 	choice := strings.ToLower(strings.TrimSpace(dagAlloc))
 	if choice == "" {
 		choice = "auto"
 	}
 	if choice == "auto" {
-		switch backend {
-		case BackendCPU, BackendUnified, BackendGPU:
-			return fallbackMemoryStrategy{
-				name: "auto",
-				strategies: []MemoryStrategy{
-					CUDAManagedMemory{},
-					OpenCLSVM{},
-					GoHeapMemory{},
-				},
-			}, nil
-		default:
-			return nil, fmt.Errorf("unsupported backend %q", backend)
-		}
+		return fallbackMemoryStrategy{name: "auto", strategies: r.autoStrategies()}, nil
 	}
 	switch choice {
 	case "go", "go-heap":
@@ -120,10 +131,42 @@ func selectDAGStrategy(backend BackendMode, dagAlloc string) (MemoryStrategy, er
 	case "pinned", "pinned-host":
 		return PinnedMemory{}, nil
 	case "cuda", "cuda-managed":
-		return CUDAManagedMemory{}, nil
+		if ordinal, ok := r.cudaDeviceOrdinal(); ok {
+			return CUDAManagedMemory{DeviceOrdinal: ordinal, Ready: true}, nil
+		}
+		return nil, fmt.Errorf("cuda managed allocation requires initialized runtime/device")
 	case "opencl", "opencl-svm", "svm":
-		return OpenCLSVM{}, nil
+		if ctx, ok := r.openclContext(); ok {
+			return OpenCLSVM{Context: ctx}, nil
+		}
+		return nil, fmt.Errorf("opencl svm requires a live OpenCL context and device")
 	default:
 		return nil, fmt.Errorf("unsupported dag allocation strategy %q (expected one of: auto, go-heap, pinned-host, cuda-managed, opencl-svm)", dagAlloc)
 	}
+}
+
+func (r dagStrategyResolver) autoStrategies() []MemoryStrategy {
+	strategies := make([]MemoryStrategy, 0, 3)
+	if ordinal, ok := r.cudaDeviceOrdinal(); ok {
+		strategies = append(strategies, CUDAManagedMemory{DeviceOrdinal: ordinal, Ready: true})
+	}
+	if ctx, ok := r.openclContext(); ok {
+		strategies = append(strategies, OpenCLSVM{Context: ctx})
+	}
+	strategies = append(strategies, GoHeapMemory{})
+	return strategies
+}
+
+func (r dagStrategyResolver) cudaDeviceOrdinal() (int, bool) {
+	if r.runtime == nil {
+		return 0, false
+	}
+	return r.runtime.CUDADeviceOrdinal()
+}
+
+func (r dagStrategyResolver) openclContext() (OpenCLContext, bool) {
+	if r.runtime == nil {
+		return OpenCLContext{}, false
+	}
+	return r.runtime.OpenCLContext()
 }

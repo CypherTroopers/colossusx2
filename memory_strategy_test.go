@@ -2,6 +2,7 @@ package main
 
 import (
 	"testing"
+	"unsafe"
 
 	cx "colossusx/colossusx"
 )
@@ -32,10 +33,10 @@ func TestUnsupportedStrategyReturnsExplicitError(t *testing.T) {
 		t.Fatal("expected unsupported pinned strategy to fail")
 	}
 	if _, err := (CUDAManagedMemory{}).Alloc(64); err == nil {
-		t.Fatal("expected CUDA managed memory stub to fail without cuda+cgo build")
+		t.Fatal("expected CUDA managed memory to fail without initialized runtime")
 	}
 	if _, err := (OpenCLSVM{}).Alloc(64); err == nil {
-		t.Fatal("expected OpenCL SVM stub to fail without opencl+cgo build")
+		t.Fatal("expected OpenCL SVM to fail without live context/device")
 	}
 }
 
@@ -53,13 +54,10 @@ func TestDAGCloseReleasesOwnedAllocation(t *testing.T) {
 	}
 }
 
-func TestSelectDAGStrategy(t *testing.T) {
-	strategy, err := selectDAGStrategy(BackendCPU, "auto")
+func TestSelectDAGStrategyAutoFallsBackToGoHeapWithoutRuntime(t *testing.T) {
+	strategy, err := dagStrategyResolver{backend: BackendCPU}.Resolve("auto")
 	if err != nil {
-		t.Fatalf("selectDAGStrategy: %v", err)
-	}
-	if strategy.Name() != "auto" {
-		t.Fatalf("expected auto, got %q", strategy.Name())
+		t.Fatalf("Resolve: %v", err)
 	}
 	alloc, err := strategy.Alloc(64)
 	if err != nil {
@@ -69,8 +67,30 @@ func TestSelectDAGStrategy(t *testing.T) {
 	if alloc.Name() != "go-heap" {
 		t.Fatalf("expected auto strategy to fall back to go-heap in test environment, got %q", alloc.Name())
 	}
-	if _, err := selectDAGStrategy(BackendUnified, "bogus"); err == nil {
-		t.Fatal("expected invalid dag strategy to fail")
+}
+
+func TestAllocatorResolutionDependsOnRuntimeInitialization(t *testing.T) {
+	resolver := dagStrategyResolver{backend: BackendGPU}
+	if _, err := resolver.Resolve("cuda-managed"); err == nil {
+		t.Fatal("expected cuda-managed resolution to fail before runtime initialization")
+	}
+	resolver.runtime = fakeRuntimeState{cudaOrdinal: 3, cudaOK: true}
+	strategy, err := resolver.Resolve("cuda-managed")
+	if err != nil {
+		t.Fatalf("Resolve(cuda-managed): %v", err)
+	}
+	if strategy.Name() != "cuda-managed" {
+		t.Fatalf("unexpected strategy: %s", strategy.Name())
+	}
+	if _, err := (dagStrategyResolver{backend: BackendGPU}).Resolve("opencl-svm"); err == nil {
+		t.Fatal("expected opencl-svm resolution to fail before runtime initialization")
+	}
+	strategy, err = (dagStrategyResolver{backend: BackendGPU, runtime: fakeRuntimeState{openclCtx: OpenCLContext{Context: unsafe.Pointer(new(byte)), Device: unsafe.Pointer(new(byte))}, openclOK: true}}).Resolve("opencl-svm")
+	if err != nil {
+		t.Fatalf("Resolve(opencl-svm): %v", err)
+	}
+	if strategy.Name() != "opencl-svm" {
+		t.Fatalf("unexpected strategy: %s", strategy.Name())
 	}
 }
 

@@ -1,30 +1,31 @@
-//go:build !opencl
+//go:build !opencl && !cuda
 
 package main
 
 import cx "colossusx/colossusx"
 
 type GPUBackend struct {
-	fallback UnifiedBackend
+	cpuFallback CPUBackend
+	lastPlan    GPUExecutionPlan
 }
 
 func (b *GPUBackend) Mode() BackendMode { return BackendGPU }
 
 func (b *GPUBackend) Description() string {
-	return "gpu backend enabled with reference-equivalent unified-memory execution path"
+	return "gpu backend using CPU reference hashing only because no GPU runtime build tags are enabled"
 }
-
-func (b *GPUBackend) Prepare(dag *DAG) error {
-	return b.fallback.Prepare(dag)
-}
-
+func (b *GPUBackend) InitializeRuntime() error             { return nil }
+func (b *GPUBackend) CUDADeviceOrdinal() (int, bool)       { return 0, false }
+func (b *GPUBackend) OpenCLContext() (OpenCLContext, bool) { return OpenCLContext{}, false }
+func (b *GPUBackend) Prepare(dag *DAG) error               { return b.cpuFallback.Prepare(dag) }
 func (b *GPUBackend) Hash(header []byte, nonce cx.Nonce, dag *DAG) HashResult {
-	return b.fallback.Hash(header, nonce, dag)
+	return b.cpuFallback.Hash(header, nonce, dag)
 }
-
 func (b *GPUBackend) HashBatch(header []byte, startNonce cx.Nonce, count uint64, dag *DAG) ([]HashResult, error) {
-	return b.fallback.HashBatch(header, startNonce, count, dag)
+	b.lastPlan = GPUExecutionPlan{Fallback: "cpu-reference", UsedFallback: true}
+	return b.cpuFallback.HashBatch(header, startNonce, count, dag)
 }
+func (b *GPUBackend) ExecutionPlan() GPUExecutionPlan { return b.lastPlan }
 
 func NewGPUBackend() (HashBackend, error) {
 	return &GPUBackend{}, nil
