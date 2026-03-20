@@ -205,7 +205,27 @@ The commands below are updated to match the **actual runnable entrypoint**: `./c
 ```bash
 go run ./cmd/colossusx -h
 ```
+### DAG size reference (`--dag-mib`)
 
+`--dag-mib` is specified in MiB, not GiB.
+
+Common values:
+- 4 GiB  = 4096
+- 8 GiB  = 8192
+- 16 GiB = 16384
+- 32 GiB = 32768
+- 80 GiB = 81920
+
+Examples:
+- `--mode research --dag-mib 4096`  => 4 GiB DAG
+- `--mode research --dag-mib 8192`  => 8 GiB DAG
+- `--mode research --dag-mib 16384` => 16 GiB DAG
+- `--mode research --dag-mib 32768` => 32 GiB DAG
+- `--mode research --dag-mib 81920` => 80 GiB DAG
+
+Note:
+- In `research` mode, DAG size is configurable via `--dag-mib`.
+- In `strict` mode, DAG size is fixed to the strict protocol constant (80 GiB).
 ### Small research benchmark: unified backend
 
 ```bash
