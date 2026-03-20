@@ -118,7 +118,7 @@ type GPUBackend struct {
 
 func (b *GPUBackend) Mode() BackendMode { return BackendGPU }
 func (b *GPUBackend) Description() string {
-	return "gpu backend with real runtime dispatch; zero-copy/shared-memory is used for CUDA managed and OpenCL SVM, while CPU hashing remains the reference-only fallback"
+	return "gpu backend that preserves the shared logical DAG image for validation; OpenCL runtime state informs memory residency, while hashing stays on the validated host path until a spec-compliant kernel is implemented"
 }
 func (b *GPUBackend) InitializeRuntime() error {
 	if b.runtimeReady || b.runtimeInitError != nil {
@@ -183,6 +183,10 @@ func NewGPUBackend() (HashBackend, error) {
 }
 
 const openclKernelSource = `
+// SPEC.md Section 2-4 note: a real OpenCL kernel must execute the full
+// COLOSSUS-X LatticeHash path on the device. Until that exists, the OpenCL
+// backend intentionally keeps hashing on the validated host path while the
+// runtime only informs memory residency and shared-DAG behavior.
 __kernel void colossusx_hash(__global const uchar *dag) {
     (void)dag;
 }

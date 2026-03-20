@@ -29,8 +29,13 @@ func TestNewDAGWithStrategyGoHeap(t *testing.T) {
 }
 
 func TestUnsupportedStrategyReturnsExplicitError(t *testing.T) {
-	if _, err := NewDAGWithStrategy(Spec{Mode: cx.ModeResearch, DAGSizeBytes: 1024, NodeSize: DefaultNodeSize, ReadsPerHash: 4, EpochBlocks: DefaultEpochBlocks}, PinnedMemory{}); err == nil {
-		t.Fatal("expected unsupported pinned strategy to fail")
+	alloc, err := NewDAGWithStrategy(Spec{Mode: cx.ModeResearch, DAGSizeBytes: 1024, NodeSize: DefaultNodeSize, ReadsPerHash: 4, EpochBlocks: DefaultEpochBlocks}, PinnedMemory{})
+	if err != nil {
+		t.Fatalf("expected pinned strategy to allocate, got: %v", err)
+	}
+	defer alloc.Close()
+	if got := alloc.AllocationName(); got != "pinned-host" {
+		t.Fatalf("expected pinned-host allocation, got %q", got)
 	}
 	if _, err := (CUDAManagedMemory{}).Alloc(64); err == nil {
 		t.Fatal("expected CUDA managed memory to fail without initialized runtime")
