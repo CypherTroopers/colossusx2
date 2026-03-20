@@ -1,6 +1,6 @@
 //go:build !opencl || !cgo
 
-package main
+package miner
 
 import (
 	"fmt"

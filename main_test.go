@@ -1,4 +1,4 @@
-package main
+package miner
 
 import (
 	"testing"
@@ -8,29 +8,29 @@ import (
 
 func TestParseBackendMode(t *testing.T) {
 	for _, mode := range []string{"unified", "cpu", "gpu"} {
-		if _, err := parseBackendMode(mode); err != nil {
-			t.Fatalf("parseBackendMode(%q) returned error: %v", mode, err)
+		if _, err := ParseBackendMode(mode); err != nil {
+			t.Fatalf("ParseBackendMode(%q) returned error: %v", mode, err)
 		}
 	}
-	if _, err := parseBackendMode("bogus"); err == nil {
+	if _, err := ParseBackendMode("bogus"); err == nil {
 		t.Fatal("expected invalid backend to fail")
 	}
 }
 
 func TestParseCLIConfigStrictModeRejectsOverrides(t *testing.T) {
-	_, err := parseCLIConfig([]string{"-mode", "strict", "-dag-mib", "1"})
+	_, err := ParseCLIConfig([]string{"-mode", "strict", "-dag-mib", "1"})
 	if err == nil {
 		t.Fatal("expected strict mode override to fail")
 	}
 }
 
 func TestParseCLIConfigResearchModeAllowsOverrides(t *testing.T) {
-	cfg, err := parseCLIConfig([]string{"-mode", "research", "-dag-mib", "1", "-reads", "8", "-epoch-blocks", "16"})
+	cfg, err := ParseCLIConfig([]string{"-mode", "research", "-dag-mib", "1", "-reads", "8", "-epoch-blocks", "16"})
 	if err != nil {
-		t.Fatalf("parseCLIConfig: %v", err)
+		t.Fatalf("ParseCLIConfig: %v", err)
 	}
-	if cfg.spec.Mode != cx.ModeResearch || cfg.spec.DAGSizeBytes != 1024*1024 || cfg.spec.ReadsPerHash != 8 || cfg.spec.EpochBlocks != 16 {
-		t.Fatalf("unexpected research spec: %+v", cfg.spec)
+	if cfg.Spec.Mode != cx.ModeResearch || cfg.Spec.DAGSizeBytes != 1024*1024 || cfg.Spec.ReadsPerHash != 8 || cfg.Spec.EpochBlocks != 16 {
+		t.Fatalf("unexpected research spec: %+v", cfg.Spec)
 	}
 }
 
@@ -112,9 +112,9 @@ func TestCPUBackendCopiesPreparedDAG(t *testing.T) {
 
 func TestRunInitializesBackendRuntimeBeforeResolvingAllocator(t *testing.T) {
 	spec := Spec{Mode: cx.ModeResearch, DAGSizeBytes: 64 * 64, NodeSize: DefaultNodeSize, ReadsPerHash: 4, EpochBlocks: DefaultEpochBlocks}
-	cfg := cliConfig{mode: cx.ModeResearch, backend: BackendGPU, dagAlloc: "auto", spec: spec, workers: 1, header: []byte("01"), epochSeed: []byte("seedseedseedseedseedseedseedseed"), target: cx.Target{}, maxNonces: 1, benchOnly: true}
+	cfg := CLIConfig{Mode: cx.ModeResearch, Backend: BackendGPU, DAGAlloc: "auto", Spec: spec, Workers: 1, Header: []byte("01"), EpochSeed: []byte("seedseedseedseedseedseedseedseed"), Target: cx.Target{}, MaxNonces: 1, BenchOnly: true}
 	backend := &fakeGPUBackend{}
-	if err := run(cfg, backend); err != nil {
+	if err := Run(cfg, backend); err != nil {
 		t.Fatalf("run: %v", err)
 	}
 	if !backend.runtimeCalled {

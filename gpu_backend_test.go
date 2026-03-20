@@ -1,6 +1,6 @@
 //go:build !cuda
 
-package main
+package miner
 
 import (
 	"errors"
@@ -152,8 +152,8 @@ func TestSuccessfulGPURunAvoidsNormalFallback(t *testing.T) {
 		t.Fatalf("GenerateDAG: %v", err)
 	}
 	backend := &fakeGPUBackend{}
-	if _, err := initializeBackendRuntime(backend); err != nil {
-		t.Fatalf("initializeBackendRuntime: %v", err)
+	if _, err := InitializeBackendRuntime(backend); err != nil {
+		t.Fatalf("InitializeBackendRuntime: %v", err)
 	}
 	if !backend.runtimeCalled {
 		t.Fatal("expected runtime initialization before allocator resolution")

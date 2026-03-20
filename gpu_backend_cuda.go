@@ -1,6 +1,6 @@
 //go:build cuda
 
-package main
+package miner
 
 import (
 	"fmt"

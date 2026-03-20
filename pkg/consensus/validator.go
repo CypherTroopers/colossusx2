@@ -23,13 +23,16 @@ var (
 )
 
 type Validator struct {
-	config    types.ChainConfig
-	backend   cx.HashBackend
-	workers   int
-	now       func() time.Time
-	mu        sync.Mutex
-	dags      map[string]*cx.DAG
-	allocator cx.Allocator
+	config          types.ChainConfig
+	backend         cx.HashBackend
+	workers         int
+	now             func() time.Time
+	mu              sync.Mutex
+	validationDAGs  map[string]*cx.DAG
+	miningDAGs      map[string]*cx.DAG
+	allocator       cx.Allocator
+	miningBackend   cx.HashBackend
+	miningAllocator cx.Allocator
 }
 
 type dagKey struct {
@@ -70,13 +73,49 @@ func NewValidator(cfg types.ChainConfig, backend cx.HashBackend, workers int) (*
 		backend = CPUBackend{}
 	}
 	return &Validator{
-		config:    cfg,
-		backend:   backend,
-		workers:   workers,
-		now:       time.Now,
-		dags:      make(map[string]*cx.DAG),
-		allocator: sliceAllocator{},
+		config:          cfg,
+		backend:         backend,
+		workers:         workers,
+		now:             time.Now,
+		validationDAGs:  make(map[string]*cx.DAG),
+		miningDAGs:      make(map[string]*cx.DAG),
+		allocator:       sliceAllocator{},
+		miningBackend:   backend,
+		miningAllocator: sliceAllocator{},
 	}, nil
+}
+
+func (v *Validator) SetMiningBackend(backend cx.HashBackend, allocator cx.Allocator) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if backend != nil {
+		v.miningBackend = backend
+	}
+	if allocator != nil {
+		v.miningAllocator = allocator
+	}
+	for key, dag := range v.miningDAGs {
+		_ = dag.Close()
+		delete(v.miningDAGs, key)
+	}
+}
+
+func (v *Validator) MiningBackend() cx.HashBackend {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if v.miningBackend == nil {
+		return v.backend
+	}
+	return v.miningBackend
+}
+
+func (v *Validator) MiningAllocatorName() string {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if v.miningAllocator == nil {
+		return ""
+	}
+	return v.miningAllocator.Name()
 }
 
 func (v *Validator) ValidateHeader(store chain.Store, header types.BlockHeader) error {
@@ -179,11 +218,15 @@ func (v *Validator) InsertBlock(store chain.Store, block types.Block) (*big.Int,
 }
 
 func (v *Validator) SealBlock(block types.Block, maxNonces uint64) (types.Block, cx.MineResult, error) {
-	dag, err := v.dagForHeader(block.Header)
+	backend := v.MiningBackend()
+	dag, err := v.miningDAGForHeader(block.Header)
 	if err != nil {
 		return types.Block{}, cx.MineResult{}, err
 	}
-	miner, err := cx.NewMiner(v.config.Spec, dag, v.workers, v.backend)
+	if err := backend.Prepare(dag); err != nil {
+		return types.Block{}, cx.MineResult{}, err
+	}
+	miner, err := cx.NewMiner(v.config.Spec, dag, v.workers, sealSkipPrepareBackend{backend})
 	if err != nil {
 		return types.Block{}, cx.MineResult{}, err
 	}
@@ -199,18 +242,26 @@ func (v *Validator) SealBlock(block types.Block, maxNonces uint64) (types.Block,
 	return block, res, nil
 }
 
+type sealSkipPrepareBackend struct{ cx.HashBackend }
+
+func (b sealSkipPrepareBackend) Prepare(*cx.DAG) error { return nil }
+
 func (v *Validator) Close() error {
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	for key, dag := range v.dags {
+	for key, dag := range v.validationDAGs {
 		_ = dag.Close()
-		delete(v.dags, key)
+		delete(v.validationDAGs, key)
+	}
+	for key, dag := range v.miningDAGs {
+		_ = dag.Close()
+		delete(v.miningDAGs, key)
 	}
 	return nil
 }
 
 func (v *Validator) validatePoW(header types.BlockHeader) error {
-	dag, err := v.dagForHeader(header)
+	dag, err := v.validationDAGForHeader(header)
 	if err != nil {
 		return err
 	}
@@ -221,17 +272,31 @@ func (v *Validator) validatePoW(header types.BlockHeader) error {
 	return nil
 }
 
-func (v *Validator) dagForHeader(header types.BlockHeader) (*cx.DAG, error) {
+func (v *Validator) validationDAGForHeader(header types.BlockHeader) (*cx.DAG, error) {
+	return v.dagForHeader(header, v.allocator, v.validationDAGs)
+}
+
+func (v *Validator) miningDAGForHeader(header types.BlockHeader) (*cx.DAG, error) {
+	v.mu.Lock()
+	allocator := v.miningAllocator
+	v.mu.Unlock()
+	if allocator == nil {
+		allocator = v.allocator
+	}
+	return v.dagForHeader(header, allocator, v.miningDAGs)
+}
+
+func (v *Validator) dagForHeader(header types.BlockHeader, allocator cx.Allocator, cache map[string]*cx.DAG) (*cx.DAG, error) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	key := dagKey{seed: header.EpochSeed.String(), size: header.DAGSizeBytes}
-	encoded := fmt.Sprintf("%s/%d", key.seed, key.size)
-	if dag, ok := v.dags[encoded]; ok {
+	encoded := fmt.Sprintf("%s/%d/%s", key.seed, key.size, allocator.Name())
+	if dag, ok := cache[encoded]; ok {
 		return dag, nil
 	}
 	spec := v.config.Spec
 	spec.DAGSizeBytes = header.DAGSizeBytes
-	dag, err := cx.NewDAGWithAllocator(spec, v.allocator)
+	dag, err := cx.NewDAGWithAllocator(spec, allocator)
 	if err != nil {
 		return nil, err
 	}
@@ -239,6 +304,6 @@ func (v *Validator) dagForHeader(header types.BlockHeader) (*cx.DAG, error) {
 		_ = dag.Close()
 		return nil, err
 	}
-	v.dags[encoded] = dag
+	cache[encoded] = dag
 	return dag, nil
 }

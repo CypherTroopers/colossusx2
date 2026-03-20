@@ -18,15 +18,20 @@ import (
 )
 
 type Config struct {
-	Chain      types.ChainConfig
-	Genesis    types.GenesisConfig
-	Mine       bool
-	MaxNonces  uint64
-	BlockTime  time.Duration
-	Logf       func(string, ...any)
-	NodeID     string
-	ListenAddr string
-	Bootnodes  []string
+	Chain              types.ChainConfig
+	Genesis            types.GenesisConfig
+	Mine               bool
+	MaxNonces          uint64
+	BlockTime          time.Duration
+	Logf               func(string, ...any)
+	NodeID             string
+	ListenAddr         string
+	Bootnodes          []string
+	MinerBackend       string
+	MinerDAGAlloc      string
+	ResolvedDAGAlloc   string
+	RuntimeInitStatus  string
+	MinerExecutionPath string
 }
 
 type Node struct {
@@ -54,6 +59,7 @@ func New(cfg Config, validator *consensus.Validator, store chain.Store) (*Node, 
 		cfg.NodeID = fmt.Sprintf("node-%d", time.Now().UnixNano())
 	}
 	n := &Node{cfg: cfg, validator: validator, store: store}
+	cfg.Logf("node mining configured backend=%s dag_alloc=%s resolved_alloc=%s runtime_init=%s execution=%s", cfg.MinerBackend, cfg.MinerDAGAlloc, cfg.ResolvedDAGAlloc, cfg.RuntimeInitStatus, cfg.MinerExecutionPath)
 	n.p2p = p2p.NewServer(p2p.Config{
 		NodeID:        cfg.NodeID,
 		Network:       cfg.Chain.NetworkID,

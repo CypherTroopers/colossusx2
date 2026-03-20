@@ -1,5 +1,5 @@
 //go:build !(cgo && opencl)
 
-package main
+package miner
 
 func newOpenCLSharedAllocationKernel() openCLSharedAllocationKernel { return nil }

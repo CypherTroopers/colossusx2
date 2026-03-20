@@ -1,6 +1,6 @@
 //go:build cgo && opencl
 
-package main
+package miner
 
 /*
 #cgo LDFLAGS: -lOpenCL
