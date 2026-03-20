@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 	"syscall"
 	"time"
@@ -34,13 +35,21 @@ func main() {
 		}
 	}()
 
+	store, err := chain.NewDiskStore(cfg.DataDir)
+	if err != nil {
+		log.Fatal(err)
+	}
+
 	n, err := node.New(node.Config{
-		Chain:     cfg.Chain,
-		Genesis:   cfg.Genesis,
-		Mine:      cfg.Mine,
-		MaxNonces: cfg.MaxNonces,
-		BlockTime: cfg.BlockTime,
-	}, validator, chain.NewMemoryStore())
+		Chain:      cfg.Chain,
+		Genesis:    cfg.Genesis,
+		Mine:       cfg.Mine,
+		MaxNonces:  cfg.MaxNonces,
+		BlockTime:  cfg.BlockTime,
+		NodeID:     cfg.NodeID,
+		ListenAddr: cfg.ListenAddr,
+		Bootnodes:  cfg.Bootnodes,
+	}, validator, store)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -48,19 +57,23 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	fmt.Printf("colossusd starting network=%s mode=%s dag=%dMiB workers=%d mine=%t\n", cfg.Chain.NetworkID, cfg.Chain.Spec.Mode, cfg.Chain.Spec.DAGSizeBytes/(1024*1024), cfg.Workers, cfg.Mine)
+	fmt.Printf("colossusd starting network=%s mode=%s dag=%dMiB workers=%d mine=%t datadir=%s listen=%s bootnodes=%d node_id=%s\n", cfg.Chain.NetworkID, cfg.Chain.Spec.Mode, cfg.Chain.Spec.DAGSizeBytes/(1024*1024), cfg.Workers, cfg.Mine, cfg.DataDir, cfg.ListenAddr, len(cfg.Bootnodes), cfg.NodeID)
 	if err := n.Run(ctx); err != nil && err != context.Canceled {
 		log.Fatal(err)
 	}
 }
 
 type config struct {
-	Chain     types.ChainConfig
-	Genesis   types.GenesisConfig
-	Mine      bool
-	Workers   int
-	MaxNonces uint64
-	BlockTime time.Duration
+	Chain      types.ChainConfig
+	Genesis    types.GenesisConfig
+	Mine       bool
+	Workers    int
+	MaxNonces  uint64
+	BlockTime  time.Duration
+	DataDir    string
+	ListenAddr string
+	Bootnodes  []string
+	NodeID     string
 }
 
 func parseFlags() (config, error) {
@@ -71,10 +84,18 @@ func parseFlags() (config, error) {
 	reads := fs.Uint64("reads", 32, "DAG reads per hash for research mode")
 	epochBlocks := fs.Uint64("epoch-blocks", 32, "blocks per epoch for research mode")
 	mine := fs.Bool("mine", true, "enable local mining loop")
+	noMine := fs.Bool("no-mine", false, "disable local mining loop")
 	workers := fs.Int("workers", runtime.NumCPU(), "mining workers")
 	maxNonces := fs.Uint64("max-nonces", 500000, "maximum nonce range per block template")
 	blockTime := fs.Duration("block-time", 500*time.Millisecond, "delay between mined blocks")
 	genesisMessage := fs.String("genesis-message", "colossusx devnet genesis", "genesis message")
+	dataDir := fs.String("datadir", filepath.Join(".", "data"), "node data directory")
+	listenAddr := fs.String("listen", ":30333", "tcp listen address")
+	bootnodes := fs.String("bootnodes", "", "comma-separated bootnode addresses")
+	nodeID := fs.String("node-id", "", "stable node identifier")
+	targetHex := fs.String("target", "0fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", "mining target in hex")
+	rpcListen := fs.String("rpc-listen", "", "reserved for future RPC listener")
+	_ = rpcListen
 	if err := fs.Parse(os.Args[1:]); err != nil {
 		return config{}, err
 	}
@@ -92,9 +113,12 @@ func parseFlags() (config, error) {
 	if err := spec.Validate(); err != nil {
 		return config{}, err
 	}
-	target, err := cx.ParseTargetHex("0fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff")
+	target, err := cx.ParseTargetHex(*targetHex)
 	if err != nil {
 		return config{}, err
+	}
+	if *noMine {
+		*mine = false
 	}
 	chainCfg := types.ChainConfig{NetworkID: *networkID, Spec: spec}
 	genesis := types.GenesisConfig{
@@ -105,5 +129,5 @@ func parseFlags() (config, error) {
 		Spec:      spec,
 		ExtraData: fmt.Sprintf("mode=%s", spec.Mode),
 	}
-	return config{Chain: chainCfg, Genesis: genesis, Mine: *mine, Workers: *workers, MaxNonces: *maxNonces, BlockTime: *blockTime}, nil
+	return config{Chain: chainCfg, Genesis: genesis, Mine: *mine, Workers: *workers, MaxNonces: *maxNonces, BlockTime: *blockTime, DataDir: *dataDir, ListenAddr: *listenAddr, Bootnodes: node.ParseBootnodes(*bootnodes), NodeID: *nodeID}, nil
 }
