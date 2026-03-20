@@ -17,7 +17,7 @@ The current repository is primarily a **reference implementation and research ha
 - `memory_strategy.go`: DAG allocation strategy selection (`auto`, `go-heap`, `pinned-host`, `cuda-managed`, `opencl-svm`).
 - `dag_helpers.go`: thin wrappers used by the CLI/tests for DAG construction and generation.
 - `SPEC.md`: design/spec narrative for the COLOSSUS-X algorithm.
-- `Makefile`: convenient build and small research-mode benchmark commands.
+- `Makefile`: convenient build/help targets plus benchmark/mining helper commands that currently invoke the CLI with small DAG flags.
 
 ## What the code implements today
 
@@ -63,7 +63,7 @@ In strict mode, CLI overrides for DAG size, reads per hash, and epoch length are
 
 Research mode keeps the same algorithm but allows smaller DAGs and alternate round counts so the code can be tested locally.
 
-This is the mode used by the tests and the Makefile benchmark helpers.
+This is the mode used by the tests and by the explicit research-mode CLI examples below.
 
 ## Backends and memory behavior
 
@@ -152,7 +152,12 @@ make bench-cpu
 make mine-easy
 ```
 
-The benchmark and mining helper targets use small DAG settings suitable for research/development runs.
+Current behavior of the helper targets:
+
+- `make deps` and `make build` work as advertised.
+- `make run-help` prints the CLI help text, but the underlying `go run . -h` exits via Go's `flag: help requested` path, so the Make target itself returns a non-zero status.
+- `make bench-small`, `make bench-cpu`, and `make mine-easy` pass small-DAG flags **without** `-mode research`. Because the CLI default is `strict`, those targets currently fail fast with `strict mode does not allow overriding DAG, reads, or epoch constants`.
+- To run equivalent small development commands successfully, use the explicit research-mode CLI examples shown above.
 
 ## Testing
 
