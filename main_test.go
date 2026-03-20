@@ -124,3 +124,25 @@ func TestRunInitializesBackendRuntimeBeforeResolvingAllocator(t *testing.T) {
 		t.Fatal("expected run to prepare backend after dag allocation/population")
 	}
 }
+
+func TestStrictSpecLocksSectionTwoConstants(t *testing.T) {
+	spec := cx.StrictSpec()
+	if spec.ReadsPerHash != cx.StrictReadsPerHash {
+		t.Fatalf("expected strict reads/hash %d, got %d", cx.StrictReadsPerHash, spec.ReadsPerHash)
+	}
+	if spec.ReadsPerHash != 512 {
+		t.Fatalf("expected strict spec to preserve Section 2 bandwidth target reads/hash, got %d", spec.ReadsPerHash)
+	}
+	if spec.EpochBlocks != 8000 {
+		t.Fatalf("expected strict epoch blocks 8000, got %d", spec.EpochBlocks)
+	}
+}
+
+func TestStrictDAGRequiresFullLogicalImage(t *testing.T) {
+	spec := cx.StrictSpec()
+	alloc := &testAllocation{buf: make([]byte, 1024)}
+	_, err := NewDAGWithAllocation(spec, alloc, false)
+	if err == nil {
+		t.Fatal("expected strict DAG allocation to require the full logical DAG image")
+	}
+}

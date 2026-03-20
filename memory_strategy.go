@@ -78,8 +78,7 @@ func (GoHeapMemory) Name() string { return "go-heap" }
 type PinnedMemory struct{}
 
 func (PinnedMemory) Alloc(size uint64) (cx.Allocation, error) {
-	_ = size
-	return nil, ErrNotImplemented("pinned memory requires platform-specific implementation")
+	return allocPinnedHost(size)
 }
 func (PinnedMemory) Name() string { return "pinned-host" }
 

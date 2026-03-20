@@ -50,7 +50,7 @@ type CUDAHashBackend struct {
 
 func (b *CUDAHashBackend) Mode() BackendMode { return BackendGPU }
 func (b *CUDAHashBackend) Description() string {
-	return "cuda backend using managed-memory DAG directly from the CUDA execution path; CPU hashing is retained only as a runtime-unavailable fallback"
+	return "cuda backend using a shared logical DAG image from cuda-managed memory; hashing remains on the validated host path until a spec-compliant CUDA kernel lands"
 }
 func (b *CUDAHashBackend) InitializeRuntime() error {
 	if b.runtime == nil {
