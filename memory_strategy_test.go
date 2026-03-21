@@ -131,3 +131,21 @@ func TestValidationReuseCapabilityForManagedAllocators(t *testing.T) {
 		t.Fatal("expected valid opencl-svm strategy to allow DAG reuse")
 	}
 }
+
+func TestResolveDAGStrategyForModeStrictRejectsHostAllocators(t *testing.T) {
+	if _, err := ResolveDAGStrategyForMode(cx.ModeStrict, BackendOpenCL, nil, "go-heap"); err == nil {
+		t.Fatal("expected strict mode to reject go-heap")
+	}
+	if _, err := ResolveDAGStrategyForMode(cx.ModeStrict, BackendOpenCL, nil, "pinned-host"); err == nil {
+		t.Fatal("expected strict mode to reject pinned-host")
+	}
+}
+
+func TestValidateStrictProductionConfigRejectsLegacyBackends(t *testing.T) {
+	if err := ValidateStrictProductionConfig(cx.ModeStrict, BackendCPU, "auto"); err == nil {
+		t.Fatal("expected strict mode to reject cpu backend")
+	}
+	if err := ValidateStrictProductionConfig(cx.ModeStrict, BackendUnified, "auto"); err == nil {
+		t.Fatal("expected strict mode to reject legacy unified backend")
+	}
+}

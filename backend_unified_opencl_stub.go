@@ -39,7 +39,8 @@ func (stubOpenCLRuntime) CUDADeviceOrdinal() (int, bool) { return 0, false }
 func (stubOpenCLRuntime) OpenCLContext() (OpenCLContext, bool) {
 	return OpenCLContext{}, false
 }
-func (stubOpenCLRuntime) SetContext(OpenCLContext) {}
+func (stubOpenCLRuntime) MetalContext() (MetalContext, bool) { return MetalContext{}, false }
+func (stubOpenCLRuntime) SetContext(OpenCLContext)           {}
 
 func allocOpenCLSVM(ctx OpenCLContext, size uint64) (managedAllocation, error) {
 	_, _ = ctx, size

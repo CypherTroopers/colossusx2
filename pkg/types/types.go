@@ -14,16 +14,17 @@ import (
 type Hash [32]byte
 
 type BlockHeader struct {
-	Version      uint32    `json:"version"`
-	Height       uint64    `json:"height"`
-	ParentHash   Hash      `json:"parent_hash"`
-	Timestamp    int64     `json:"timestamp"`
-	Target       cx.Target `json:"target"`
-	Nonce        uint64    `json:"nonce"`
-	EpochSeed    Hash      `json:"epoch_seed"`
-	DAGSizeBytes uint64    `json:"dag_size_bytes"`
-	TxRoot       Hash      `json:"tx_root"`
-	StateRoot    Hash      `json:"state_root"`
+	Version          uint32    `json:"version"`
+	AlgorithmVersion uint32    `json:"algorithm_version"`
+	Height           uint64    `json:"height"`
+	ParentHash       Hash      `json:"parent_hash"`
+	Timestamp        int64     `json:"timestamp"`
+	Target           cx.Target `json:"target"`
+	Nonce            uint64    `json:"nonce"`
+	EpochSeed        Hash      `json:"epoch_seed"`
+	DAGSizeBytes     uint64    `json:"dag_size_bytes"`
+	TxRoot           Hash      `json:"tx_root"`
+	StateRoot        Hash      `json:"state_root"`
 }
 
 type Block struct {
@@ -62,10 +63,8 @@ type MiningTemplate struct {
 	Header    BlockHeader `json:"header"`
 }
 
-func (h Hash) String() string { return hex.EncodeToString(h[:]) }
-
+func (h Hash) String() string               { return hex.EncodeToString(h[:]) }
 func (h Hash) MarshalJSON() ([]byte, error) { return json.Marshal(h.String()) }
-
 func (h *Hash) UnmarshalJSON(data []byte) error {
 	var s string
 	if err := json.Unmarshal(data, &s); err != nil {
@@ -81,10 +80,10 @@ func (h *Hash) UnmarshalJSON(data []byte) error {
 	copy(h[:], decoded)
 	return nil
 }
-
 func (h BlockHeader) EncodeForMining() []byte {
-	buf := make([]byte, 0, 4+8+32+8+32+32+8+32+32)
+	buf := make([]byte, 0, 4+4+8+32+8+32+32+8+32+32)
 	buf = binary.BigEndian.AppendUint32(buf, h.Version)
+	buf = binary.BigEndian.AppendUint32(buf, h.AlgorithmVersion)
 	buf = binary.BigEndian.AppendUint64(buf, h.Height)
 	buf = append(buf, h.ParentHash[:]...)
 	buf = binary.BigEndian.AppendUint64(buf, uint64(h.Timestamp))
@@ -95,42 +94,20 @@ func (h BlockHeader) EncodeForMining() []byte {
 	buf = append(buf, h.StateRoot[:]...)
 	return buf
 }
-
 func (h BlockHeader) Encode() []byte {
 	buf := h.EncodeForMining()
 	buf = binary.BigEndian.AppendUint64(buf, h.Nonce)
 	return buf
 }
-
-func (h BlockHeader) HeaderHash() Hash {
-	return sha256.Sum256(h.Encode())
-}
-
-func (b Block) BlockHash() Hash {
-	return b.Header.HeaderHash()
-}
-
+func (h BlockHeader) HeaderHash() Hash { return sha256.Sum256(h.Encode()) }
+func (b Block) BlockHash() Hash        { return b.Header.HeaderHash() }
 func NewGenesisBlock(cfg GenesisConfig) Block {
 	var txRoot Hash
 	var stateRoot Hash
 	txRoot = sha256.Sum256([]byte(cfg.Message))
 	stateRoot = sha256.Sum256([]byte(cfg.ExtraData))
-	return Block{
-		Header: BlockHeader{
-			Version:      1,
-			Height:       0,
-			ParentHash:   Hash{},
-			Timestamp:    cfg.Timestamp,
-			Target:       cfg.Bits,
-			Nonce:        0,
-			EpochSeed:    EpochSeedForHeight(cfg.Spec, 0),
-			DAGSizeBytes: cfg.Spec.DAGSizeBytes,
-			TxRoot:       txRoot,
-			StateRoot:    stateRoot,
-		},
-	}
+	return Block{Header: BlockHeader{Version: 1, AlgorithmVersion: cfg.Spec.AlgorithmVersion, Height: 0, ParentHash: Hash{}, Timestamp: cfg.Timestamp, Target: cfg.Bits, Nonce: 0, EpochSeed: EpochSeedForHeight(cfg.Spec, 0), DAGSizeBytes: cfg.Spec.DAGSizeBytes, TxRoot: txRoot, StateRoot: stateRoot}}
 }
-
 func EpochSeedForHeight(spec cx.Spec, height uint64) Hash {
 	var seedMaterial [16]byte
 	binary.BigEndian.PutUint64(seedMaterial[:8], height/spec.EpochBlocks)

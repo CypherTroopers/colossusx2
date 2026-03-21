@@ -147,15 +147,16 @@ func (n *Node) mineNextBlock() (types.Block, cx.MineResult, error) {
 		return types.Block{}, cx.MineResult{}, err
 	}
 	header := types.BlockHeader{
-		Version:      1,
-		Height:       tip.Header.Height + 1,
-		ParentHash:   tip.BlockHash(),
-		Timestamp:    max(time.Now().Unix(), tip.Header.Timestamp+1),
-		Target:       n.cfg.Genesis.Bits,
-		EpochSeed:    types.EpochSeedForHeight(n.cfg.Chain.Spec, tip.Header.Height+1),
-		DAGSizeBytes: n.cfg.Chain.Spec.DAGSizeBytes,
-		TxRoot:       sha256.Sum256([]byte(fmt.Sprintf("height:%d", tip.Header.Height+1))),
-		StateRoot:    sha256.Sum256([]byte(tip.BlockHash().String())),
+		Version:          1,
+		AlgorithmVersion: n.cfg.Chain.Spec.AlgorithmVersion,
+		Height:           tip.Header.Height + 1,
+		ParentHash:       tip.BlockHash(),
+		Timestamp:        max(time.Now().Unix(), tip.Header.Timestamp+1),
+		Target:           n.cfg.Genesis.Bits,
+		EpochSeed:        types.EpochSeedForHeight(n.cfg.Chain.Spec, tip.Header.Height+1),
+		DAGSizeBytes:     n.cfg.Chain.Spec.DAGSizeBytes,
+		TxRoot:           sha256.Sum256([]byte(fmt.Sprintf("height:%d", tip.Header.Height+1))),
+		StateRoot:        sha256.Sum256([]byte(tip.BlockHash().String())),
 	}
 	block := types.Block{Header: header}
 	sealed, res, err := n.validator.SealBlock(block, n.cfg.MaxNonces)

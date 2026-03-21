@@ -92,6 +92,7 @@ func (r *fakeOpenCLRuntime) SetContext(ctx OpenCLContext) {
 	r.ctx = ctx
 	r.setCtxCalls++
 }
+func (r *fakeOpenCLRuntime) MetalContext() (MetalContext, bool) { return MetalContext{}, false }
 
 func testResearchDAG(t *testing.T) *DAG {
 	t.Helper()
@@ -114,7 +115,7 @@ func TestGPUBackendCanBeConstructed(t *testing.T) {
 	if backend == nil {
 		t.Fatal("expected gpu backend instance")
 	}
-	if backend.Mode() != BackendGPU {
+	if backend.Mode() != BackendOpenCL {
 		t.Fatalf("unexpected backend mode: %s", backend.Mode())
 	}
 }

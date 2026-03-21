@@ -57,13 +57,14 @@ func (a capabilityAllocator) ValidationCanReuseDAG() bool { return a.reuse }
 
 func testBlockHeader(chainCfg types.ChainConfig, genesis types.Block) types.BlockHeader {
 	return types.BlockHeader{
-		Version:      1,
-		Height:       1,
-		ParentHash:   genesis.BlockHash(),
-		Timestamp:    genesis.Header.Timestamp + 1,
-		Target:       genesis.Header.Target,
-		EpochSeed:    types.EpochSeedForHeight(chainCfg.Spec, 1),
-		DAGSizeBytes: chainCfg.Spec.DAGSizeBytes,
+		Version:          1,
+		AlgorithmVersion: chainCfg.Spec.AlgorithmVersion,
+		Height:           1,
+		ParentHash:       genesis.BlockHash(),
+		Timestamp:        genesis.Header.Timestamp + 1,
+		Target:           genesis.Header.Target,
+		EpochSeed:        types.EpochSeedForHeight(chainCfg.Spec, 1),
+		DAGSizeBytes:     chainCfg.Spec.DAGSizeBytes,
 	}
 }
 

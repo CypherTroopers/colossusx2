@@ -75,6 +75,20 @@ func (d *DAG) Node(i uint64) []byte {
 	return buf[off : off+d.spec.NodeSize]
 }
 func (d *DAG) ReadNode(i uint64, out *[64]byte) { copy(out[:], d.Node(i)) }
+
+func (d *DAG) TileCount() uint64 { return d.NodeCount() }
+func (d *DAG) ReadTensorTile(i uint64, out *TensorTile) {
+	raw := d.Node(i)
+	for j := 0; j < 256; j++ {
+		out.MatrixA[j] = int8(raw[j%64])
+		out.MatrixB[j] = int8(raw[(j+17)%64])
+	}
+	for j := 0; j < 16; j++ {
+		out.Bias[j] = int32(int8(raw[j]))
+	}
+	copy(out.Permute[:], raw[:32])
+	copy(out.Meta[:], raw[32:64])
+}
 func (d *DAG) Close() error {
 	if d == nil || d.alloc == nil || !d.ownership {
 		return nil
@@ -135,6 +149,9 @@ func GenerateDAG(spec Spec, dag []byte, epochSeed []byte, workers int) error {
 func PopulateDAG(dag *DAG, epochSeed []byte, workers int) error {
 	if dag == nil {
 		return errors.New("dag cannot be nil")
+	}
+	if dag.spec.Mode == ModeStrict {
+		return GenerateTensorDAG(dag.spec, dag.Bytes(), epochSeed, workers)
 	}
 	return GenerateDAG(dag.spec, dag.Bytes(), epochSeed, workers)
 }

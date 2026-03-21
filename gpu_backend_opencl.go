@@ -104,6 +104,7 @@ func (d *openclDispatcher) Prepare(dag *DAG, cfg gpuKernelConfig) error {
 }
 
 func (d *openclDispatcher) Dispatch(header []byte, startNonce cx.Nonce, batch int, dag *DAG) (GPUDispatchResult, error) {
+	strict := dag != nil && dag.Spec().Mode == cx.ModeStrict
 	plan := d.plan
 	if batch <= 0 {
 		plan.UsedFallback = true
@@ -144,6 +145,11 @@ func (d *openclDispatcher) Dispatch(header []byte, startNonce cx.Nonce, batch in
 			}
 		}
 	}
+	if strict {
+		plan.UsedFallback = false
+		plan.ExecutionPath = GPUExecutionPathDeviceKernel
+		return GPUDispatchResult{Plan: plan}, fmt.Errorf("strict mode requires successful OpenCL device-kernel execution; host-reference fallback is forbidden")
+	}
 	results := make([]HashResult, 0, batch)
 	view, err := newUnifiedMemoryDAGViewFromBytes(dag.Spec(), raw.Bytes)
 	if err != nil {
@@ -178,7 +184,7 @@ type GPUBackend struct {
 	runtimeInitError error
 }
 
-func (b *GPUBackend) Mode() BackendMode { return BackendGPU }
+func (b *GPUBackend) Mode() BackendMode { return BackendOpenCL }
 func (b *GPUBackend) Description() string {
 	return "gpu backend with shared-memory-first OpenCL execution that hashes directly from the canonical contiguous DAG allocation when SVM is available, and otherwise falls back to the validated host reference path"
 }
@@ -202,6 +208,7 @@ func (b *GPUBackend) OpenCLContext() (OpenCLContext, bool) {
 	}
 	return b.dispatcher.RuntimeState().OpenCLContext()
 }
+func (b *GPUBackend) MetalContext() (MetalContext, bool) { return MetalContext{}, false }
 func (b *GPUBackend) Prepare(dag *DAG) error {
 	if b.config.WorkgroupSize == 0 {
 		b.config = gpuKernelConfig{WorkgroupSize: 64, BatchNonces: 1024, Source: openclKernelSource, VerifierPct: 100}
