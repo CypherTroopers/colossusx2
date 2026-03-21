@@ -48,6 +48,13 @@ func (a namedAllocator) Alloc(size uint64) (cx.Allocation, error) {
 }
 func (a namedAllocator) Name() string { return a.name }
 
+type capabilityAllocator struct {
+	namedAllocator
+	reuse bool
+}
+
+func (a capabilityAllocator) ValidationCanReuseDAG() bool { return a.reuse }
+
 func testBlockHeader(chainCfg types.ChainConfig, genesis types.Block) types.BlockHeader {
 	return types.BlockHeader{
 		Version:      1,
@@ -124,6 +131,74 @@ func TestValidationAndMiningReuseSharedDAGForHostVisibleAllocator(t *testing.T) 
 	}
 }
 
+func TestValidationReusesSharedDAGWhenAllocatorCapabilityAllowsIt(t *testing.T) {
+	chainCfg, genesisCfg := testConfig(t)
+	v, err := NewValidator(chainCfg, CPUBackend{}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer v.Close()
+
+	v.SetMiningBackend(CPUBackend{}, capabilityAllocator{namedAllocator: namedAllocator{name: "cuda-managed"}, reuse: true})
+	genesis := types.NewGenesisBlock(genesisCfg)
+	header := testBlockHeader(chainCfg, genesis)
+
+	miningDAG, err := v.sharedMiningDAGForHeader(header)
+	if err != nil {
+		t.Fatal(err)
+	}
+	validationDAG, err := v.validationDAGForHeader(header)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if miningDAG != validationDAG {
+		t.Fatalf("expected validation to reuse mining DAG when allocator capability allows it")
+	}
+	if !v.DAGReuseEnabled() {
+		t.Fatalf("expected DAG reuse to be enabled for capability-backed cuda-managed allocator")
+	}
+	if got := v.SharedCacheSize(); got != 1 {
+		t.Fatalf("expected 1 shared DAG, got %d", got)
+	}
+	if got := v.ValidationCacheSize(); got != 0 {
+		t.Fatalf("expected 0 fallback validation DAGs, got %d", got)
+	}
+}
+
+func TestValidationFallsBackWhenAllocatorCapabilityDisallowsIt(t *testing.T) {
+	chainCfg, genesisCfg := testConfig(t)
+	v, err := NewValidator(chainCfg, CPUBackend{}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer v.Close()
+
+	v.SetMiningBackend(CPUBackend{}, capabilityAllocator{namedAllocator: namedAllocator{name: "cuda-managed"}, reuse: false})
+	genesis := types.NewGenesisBlock(genesisCfg)
+	header := testBlockHeader(chainCfg, genesis)
+
+	miningDAG, err := v.sharedMiningDAGForHeader(header)
+	if err != nil {
+		t.Fatal(err)
+	}
+	validationDAG, err := v.validationDAGForHeader(header)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if miningDAG == validationDAG {
+		t.Fatalf("expected validation fallback DAG when allocator capability rejects reuse")
+	}
+	if v.DAGReuseEnabled() {
+		t.Fatalf("expected DAG reuse to be disabled when capability rejects reuse")
+	}
+	if got := v.SharedCacheSize(); got != 1 {
+		t.Fatalf("expected 1 shared DAG, got %d", got)
+	}
+	if got := v.ValidationCacheSize(); got != 1 {
+		t.Fatalf("expected 1 fallback validation DAG, got %d", got)
+	}
+}
+
 func TestValidationFallsBackWhenMiningAllocatorIsNotKnownReusable(t *testing.T) {
 	chainCfg, genesisCfg := testConfig(t)
 	v, err := NewValidator(chainCfg, CPUBackend{}, 1)
@@ -148,7 +223,7 @@ func TestValidationFallsBackWhenMiningAllocatorIsNotKnownReusable(t *testing.T) 
 		t.Fatalf("expected validation fallback DAG when mining allocator is not safely reusable")
 	}
 	if v.DAGReuseEnabled() {
-		t.Fatalf("expected DAG reuse to be disabled for cuda-managed allocator")
+		t.Fatalf("expected DAG reuse to be disabled for unknown cuda-managed allocator")
 	}
 	if got := v.SharedCacheSize(); got != 1 {
 		t.Fatalf("expected 1 shared DAG, got %d", got)

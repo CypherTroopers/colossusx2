@@ -13,6 +13,13 @@ type MemoryStrategy interface {
 	cx.Allocator
 }
 
+// ValidationReusableAllocator is an optional capability interface used by the
+// validator to determine whether a mining DAG allocation remains safely
+// CPU-readable through DAG.Bytes() and can therefore be shared for validation.
+type ValidationReusableAllocator interface {
+	ValidationCanReuseDAG() bool
+}
+
 type runtimeState interface {
 	CUDADeviceOrdinal() (int, bool)
 	OpenCLContext() (OpenCLContext, bool)
@@ -73,14 +80,16 @@ type GoHeapMemory struct{}
 func (GoHeapMemory) Alloc(size uint64) (cx.Allocation, error) {
 	return &sliceAllocation{name: "go-heap", buf: make([]byte, size)}, nil
 }
-func (GoHeapMemory) Name() string { return "go-heap" }
+func (GoHeapMemory) Name() string                { return "go-heap" }
+func (GoHeapMemory) ValidationCanReuseDAG() bool { return true }
 
 type PinnedMemory struct{}
 
 func (PinnedMemory) Alloc(size uint64) (cx.Allocation, error) {
 	return allocPinnedHost(size)
 }
-func (PinnedMemory) Name() string { return "pinned-host" }
+func (PinnedMemory) Name() string                { return "pinned-host" }
+func (PinnedMemory) ValidationCanReuseDAG() bool { return true }
 
 type CUDAManagedMemory struct {
 	DeviceOrdinal int
@@ -93,7 +102,8 @@ func (m CUDAManagedMemory) Alloc(size uint64) (cx.Allocation, error) {
 	}
 	return allocCUDAManaged(m.DeviceOrdinal, size)
 }
-func (CUDAManagedMemory) Name() string { return "cuda-managed" }
+func (CUDAManagedMemory) Name() string                  { return "cuda-managed" }
+func (m CUDAManagedMemory) ValidationCanReuseDAG() bool { return m.Ready }
 
 type OpenCLSVM struct {
 	Context OpenCLContext
@@ -105,7 +115,8 @@ func (m OpenCLSVM) Alloc(size uint64) (cx.Allocation, error) {
 	}
 	return allocOpenCLSVM(m.Context, size)
 }
-func (OpenCLSVM) Name() string { return "opencl-svm" }
+func (OpenCLSVM) Name() string                  { return "opencl-svm" }
+func (m OpenCLSVM) ValidationCanReuseDAG() bool { return m.Context.valid() }
 
 type notImplementedError string
 
