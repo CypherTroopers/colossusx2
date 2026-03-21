@@ -4,6 +4,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log"
 	"math/big"
 	"runtime"
 	"strings"
@@ -47,12 +48,17 @@ func (a *sliceAllocation) Bytes() []byte { return a.buf }
 func (a *sliceAllocation) Free() error   { a.buf = nil; return nil }
 func (a *sliceAllocation) Name() string  { return "go-slice" }
 
+type validationReusableAllocator interface {
+	ValidationCanReuseDAG() bool
+}
+
 type sliceAllocator struct{}
 
 func (sliceAllocator) Alloc(size uint64) (cx.Allocation, error) {
 	return &sliceAllocation{buf: make([]byte, size)}, nil
 }
-func (sliceAllocator) Name() string { return "go-slice" }
+func (sliceAllocator) Name() string                { return "go-slice" }
+func (sliceAllocator) ValidationCanReuseDAG() bool { return true }
 
 type CPUBackend struct{}
 
@@ -281,10 +287,13 @@ func (v *Validator) validatePoW(header types.BlockHeader) error {
 }
 
 func (v *Validator) validationDAGForHeader(header types.BlockHeader) (*cx.DAG, error) {
+	allocator := v.miningAllocatorOrDefault()
 	if v.canValidationReuseMiningDAG() {
+		log.Printf("validator DAG reuse enabled allocator=%s shared=true", allocatorName(allocator))
 		return v.sharedMiningDAGForHeader(header)
 	}
-	allocator := v.validationAllocator()
+	log.Printf("validator DAG reuse fallback allocator=%s shared=false", allocatorName(allocator))
+	allocator = v.validationAllocator()
 	return v.cachedDAGForHeader(header, allocator, v.fallbackValidationDAGs, v.fallbackValidationDAGCacheKey(header, allocator))
 }
 
@@ -328,6 +337,9 @@ func (v *Validator) canValidationReuseMiningDAG() bool {
 	allocator := v.miningAllocatorOrDefault()
 	if allocator == nil {
 		return false
+	}
+	if reusable, ok := allocator.(validationReusableAllocator); ok {
+		return reusable.ValidationCanReuseDAG()
 	}
 	name := strings.ToLower(strings.TrimSpace(allocator.Name()))
 	switch {

@@ -109,3 +109,25 @@ func TestNewDAGWithAllocationRejectsShortBuffer(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
+
+func TestValidationReuseCapabilityForManagedAllocators(t *testing.T) {
+	if !(GoHeapMemory{}).ValidationCanReuseDAG() {
+		t.Fatal("expected go-heap DAGs to be validation reusable")
+	}
+	if !(PinnedMemory{}).ValidationCanReuseDAG() {
+		t.Fatal("expected pinned-host DAGs to be validation reusable")
+	}
+	if (CUDAManagedMemory{}).ValidationCanReuseDAG() {
+		t.Fatal("expected uninitialized cuda-managed strategy to refuse DAG reuse")
+	}
+	if !(CUDAManagedMemory{DeviceOrdinal: 0, Ready: true}).ValidationCanReuseDAG() {
+		t.Fatal("expected ready cuda-managed strategy to allow DAG reuse")
+	}
+	if (OpenCLSVM{}).ValidationCanReuseDAG() {
+		t.Fatal("expected invalid opencl-svm strategy to refuse DAG reuse")
+	}
+	ctx := OpenCLContext{Context: unsafe.Pointer(new(byte)), Device: unsafe.Pointer(new(byte))}
+	if !(OpenCLSVM{Context: ctx}).ValidationCanReuseDAG() {
+		t.Fatal("expected valid opencl-svm strategy to allow DAG reuse")
+	}
+}
