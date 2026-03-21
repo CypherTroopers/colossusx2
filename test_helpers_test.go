@@ -13,6 +13,7 @@ func (r fakeRuntimeState) CUDADeviceOrdinal() (int, bool) { return r.cudaOrdinal
 func (r fakeRuntimeState) OpenCLContext() (OpenCLContext, bool) {
 	return r.openclCtx, r.openclOK
 }
+func (r fakeRuntimeState) MetalContext() (MetalContext, bool) { return MetalContext{}, false }
 
 type fakeGPUBackend struct {
 	prepared      bool
@@ -29,6 +30,7 @@ func (b *fakeGPUBackend) InitializeRuntime() error {
 }
 func (b *fakeGPUBackend) CUDADeviceOrdinal() (int, bool)       { return 7, true }
 func (b *fakeGPUBackend) OpenCLContext() (OpenCLContext, bool) { return OpenCLContext{}, false }
+func (b *fakeGPUBackend) MetalContext() (MetalContext, bool)   { return MetalContext{}, false }
 func (b *fakeGPUBackend) Prepare(dag *DAG) error {
 	b.prepared = true
 	if b.scratch == nil {

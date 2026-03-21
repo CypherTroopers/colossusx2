@@ -48,7 +48,7 @@ type CUDAHashBackend struct {
 	sharedKernel sharedDAGHashKernel
 }
 
-func (b *CUDAHashBackend) Mode() BackendMode { return BackendGPU }
+func (b *CUDAHashBackend) Mode() BackendMode { return BackendCUDA }
 func (b *CUDAHashBackend) Description() string {
 	return "cuda backend with shared-memory-first validation semantics that reads from the canonical cuda-managed DAG allocation on the host and does not claim device-kernel execution"
 }
@@ -65,6 +65,7 @@ func (b *CUDAHashBackend) CUDADeviceOrdinal() (int, bool) {
 	return b.runtime.CUDADeviceOrdinal()
 }
 func (b *CUDAHashBackend) OpenCLContext() (OpenCLContext, bool) { return OpenCLContext{}, false }
+func (b *CUDAHashBackend) MetalContext() (MetalContext, bool)   { return MetalContext{}, false }
 func (b *CUDAHashBackend) Prepare(dag *DAG) error {
 	if dag == nil {
 		return ErrNilDAG
@@ -78,6 +79,9 @@ func (b *CUDAHashBackend) Prepare(dag *DAG) error {
 	}
 	if dag.AllocationName() != "cuda-managed" {
 		return fmt.Errorf("cuda backend requires cuda-managed DAG allocation")
+	}
+	if dag.Spec().Mode == cx.ModeStrict {
+		return fmt.Errorf("strict mode requires cuda device-kernel execution; host-reference fallback is forbidden")
 	}
 	if _, err := newRawContiguousDAGBuffer(dag); err != nil {
 		return err
@@ -127,6 +131,5 @@ func (b *CUDAHashBackend) HashBatch(header []byte, startNonce cx.Nonce, count ui
 }
 func (b *CUDAHashBackend) ExecutionPlan() GPUExecutionPlan { return b.lastPlan }
 
-func NewGPUBackend() (HashBackend, error) {
-	return &CUDAHashBackend{}, nil
-}
+func NewGPUBackend() (HashBackend, error)  { return &CUDAHashBackend{}, nil }
+func NewCUDABackend() (HashBackend, error) { return &CUDAHashBackend{}, nil }

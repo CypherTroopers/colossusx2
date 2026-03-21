@@ -45,6 +45,15 @@ func EnsureSeedInput(s *HashScratch, headerLen int, nonce Nonce) {
 }
 
 func LatticeHash(spec Spec, header []byte, nonce Nonce, accessor DAGAccessor, scratch *HashScratch) HashResult {
+	if spec.AlgorithmVersion >= 2 {
+		if dag, ok := accessor.(*DAG); ok {
+			return StrictV2Hash(spec, header, nonce, tensorView{dag: dag})
+		}
+		if dag, ok := accessor.(interface{ UnderlyingDAG() *DAG }); ok && dag.UnderlyingDAG() != nil {
+			return StrictV2Hash(spec, header, nonce, tensorView{dag: dag.UnderlyingDAG()})
+		}
+	}
+
 	var out HashResult
 	if accessor == nil || accessor.NodeCount() == 0 {
 		return out

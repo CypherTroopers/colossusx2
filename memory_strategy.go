@@ -9,23 +9,20 @@ import (
 
 type managedAllocation = cx.Allocation
 
-type MemoryStrategy interface {
-	cx.Allocator
-}
+type MemoryStrategy interface{ cx.Allocator }
 
-// ValidationReusableAllocator is an optional capability interface used by the
-// validator to determine whether a mining DAG allocation remains safely
-// CPU-readable through DAG.Bytes() and can therefore be shared for validation.
-type ValidationReusableAllocator interface {
-	ValidationCanReuseDAG() bool
-}
+type ValidationReusableAllocator interface{ ValidationCanReuseDAG() bool }
+
+type MetalContext struct{ Device any }
 
 type runtimeState interface {
 	CUDADeviceOrdinal() (int, bool)
 	OpenCLContext() (OpenCLContext, bool)
+	MetalContext() (MetalContext, bool)
 }
 
 type dagStrategyResolver struct {
+	mode    cx.Mode
 	backend BackendMode
 	runtime runtimeState
 }
@@ -52,7 +49,6 @@ func (m fallbackMemoryStrategy) Alloc(size uint64) (cx.Allocation, error) {
 	}
 	return nil, fmt.Errorf("%s: %s", m.Name(), strings.Join(errs, "; "))
 }
-
 func (m fallbackMemoryStrategy) Name() string {
 	if m.name == "" {
 		return "fallback"
@@ -85,11 +81,9 @@ func (GoHeapMemory) ValidationCanReuseDAG() bool { return true }
 
 type PinnedMemory struct{}
 
-func (PinnedMemory) Alloc(size uint64) (cx.Allocation, error) {
-	return allocPinnedHost(size)
-}
-func (PinnedMemory) Name() string                { return "pinned-host" }
-func (PinnedMemory) ValidationCanReuseDAG() bool { return true }
+func (PinnedMemory) Alloc(size uint64) (cx.Allocation, error) { return allocPinnedHost(size) }
+func (PinnedMemory) Name() string                             { return "pinned-host" }
+func (PinnedMemory) ValidationCanReuseDAG() bool              { return true }
 
 type CUDAManagedMemory struct {
 	DeviceOrdinal int
@@ -105,9 +99,7 @@ func (m CUDAManagedMemory) Alloc(size uint64) (cx.Allocation, error) {
 func (CUDAManagedMemory) Name() string                  { return "cuda-managed" }
 func (m CUDAManagedMemory) ValidationCanReuseDAG() bool { return m.Ready }
 
-type OpenCLSVM struct {
-	Context OpenCLContext
-}
+type OpenCLSVM struct{ Context OpenCLContext }
 
 func (m OpenCLSVM) Alloc(size uint64) (cx.Allocation, error) {
 	if !m.Context.valid() {
@@ -118,26 +110,44 @@ func (m OpenCLSVM) Alloc(size uint64) (cx.Allocation, error) {
 func (OpenCLSVM) Name() string                  { return "opencl-svm" }
 func (m OpenCLSVM) ValidationCanReuseDAG() bool { return m.Context.valid() }
 
+type MetalSharedMemory struct{ Context MetalContext }
+
+func (m MetalSharedMemory) Alloc(size uint64) (cx.Allocation, error) {
+	if m.Context.Device == nil {
+		return nil, fmt.Errorf("metal shared allocation requires initialized runtime/device")
+	}
+	return &sliceAllocation{name: "metal-shared", buf: make([]byte, size)}, nil
+}
+func (MetalSharedMemory) Name() string                  { return "metal-shared" }
+func (m MetalSharedMemory) ValidationCanReuseDAG() bool { return m.Context.Device != nil }
+
 type notImplementedError string
 
 func (e notImplementedError) Error() string { return "not implemented: " + string(e) }
 func ErrNotImplemented(s string) error      { return notImplementedError(s) }
 
 func ResolveDAGStrategy(backend BackendMode, runtime runtimeState, dagAlloc string) (MemoryStrategy, error) {
-	return dagStrategyResolver{backend: backend, runtime: runtime}.Resolve(dagAlloc)
+	return ResolveDAGStrategyForMode(cx.ModeResearch, backend, runtime, dagAlloc)
 }
-
+func ResolveDAGStrategyForMode(mode cx.Mode, backend BackendMode, runtime runtimeState, dagAlloc string) (MemoryStrategy, error) {
+	return dagStrategyResolver{mode: mode, backend: backend, runtime: runtime}.Resolve(dagAlloc)
+}
 func selectDAGStrategy(backend BackendMode, dagAlloc string) (MemoryStrategy, error) {
 	return ResolveDAGStrategy(backend, nil, dagAlloc)
 }
-
 func (r dagStrategyResolver) Resolve(dagAlloc string) (MemoryStrategy, error) {
 	choice := strings.ToLower(strings.TrimSpace(dagAlloc))
 	if choice == "" {
 		choice = "auto"
 	}
+	if r.mode == cx.ModeStrict {
+		return r.resolveStrict(choice)
+	}
+	return r.resolveResearch(choice)
+}
+func (r dagStrategyResolver) resolveResearch(choice string) (MemoryStrategy, error) {
 	if choice == "auto" {
-		return fallbackMemoryStrategy{name: "auto", strategies: r.autoStrategies()}, nil
+		return fallbackMemoryStrategy{name: "auto", strategies: r.autoResearchStrategies()}, nil
 	}
 	switch choice {
 	case "go", "go-heap":
@@ -145,42 +155,76 @@ func (r dagStrategyResolver) Resolve(dagAlloc string) (MemoryStrategy, error) {
 	case "pinned", "pinned-host":
 		return PinnedMemory{}, nil
 	case "cuda", "cuda-managed":
-		if ordinal, ok := r.cudaDeviceOrdinal(); ok {
-			return CUDAManagedMemory{DeviceOrdinal: ordinal, Ready: true}, nil
+		if o, ok := r.cudaDeviceOrdinal(); ok {
+			return CUDAManagedMemory{DeviceOrdinal: o, Ready: true}, nil
 		}
 		return nil, fmt.Errorf("cuda managed allocation requires initialized runtime/device")
 	case "opencl", "opencl-svm", "svm":
-		if ctx, ok := r.openclContext(); ok {
-			return OpenCLSVM{Context: ctx}, nil
+		if c, ok := r.openclContext(); ok {
+			return OpenCLSVM{Context: c}, nil
 		}
 		return nil, fmt.Errorf("opencl svm requires a live OpenCL context and device")
 	default:
-		return nil, fmt.Errorf("unsupported dag allocation strategy %q (expected one of: auto, go-heap, pinned-host, cuda-managed, opencl-svm)", dagAlloc)
+		return nil, fmt.Errorf("unsupported dag allocation strategy %q", choice)
 	}
 }
-
-func (r dagStrategyResolver) autoStrategies() []MemoryStrategy {
+func (r dagStrategyResolver) resolveStrict(choice string) (MemoryStrategy, error) {
+	if choice == "auto" {
+		s := r.autoStrictStrategies()
+		if len(s) == 0 {
+			return nil, fmt.Errorf("strict mode requires a unified/shared DAG allocator")
+		}
+		return fallbackMemoryStrategy{name: "auto", strategies: s}, nil
+	}
+	switch choice {
+	case "cuda-managed":
+		if o, ok := r.cudaDeviceOrdinal(); ok {
+			return CUDAManagedMemory{DeviceOrdinal: o, Ready: true}, nil
+		}
+	case "opencl-svm":
+		if c, ok := r.openclContext(); ok {
+			return OpenCLSVM{Context: c}, nil
+		}
+	case "metal-shared":
+		if c, ok := r.metalContext(); ok {
+			return MetalSharedMemory{Context: c}, nil
+		}
+	}
+	return nil, fmt.Errorf("strict mode requires one of: auto, cuda-managed, opencl-svm, metal-shared")
+}
+func (r dagStrategyResolver) autoResearchStrategies() []MemoryStrategy {
+	out := r.autoStrictStrategies()
+	out = append(out, GoHeapMemory{})
+	return out
+}
+func (r dagStrategyResolver) autoStrictStrategies() []MemoryStrategy {
 	strategies := make([]MemoryStrategy, 0, 3)
-	if ordinal, ok := r.cudaDeviceOrdinal(); ok {
-		strategies = append(strategies, CUDAManagedMemory{DeviceOrdinal: ordinal, Ready: true})
+	if o, ok := r.cudaDeviceOrdinal(); ok {
+		strategies = append(strategies, CUDAManagedMemory{DeviceOrdinal: o, Ready: true})
 	}
-	if ctx, ok := r.openclContext(); ok {
-		strategies = append(strategies, OpenCLSVM{Context: ctx})
+	if c, ok := r.openclContext(); ok {
+		strategies = append(strategies, OpenCLSVM{Context: c})
 	}
-	strategies = append(strategies, GoHeapMemory{})
+	if c, ok := r.metalContext(); ok {
+		strategies = append(strategies, MetalSharedMemory{Context: c})
+	}
 	return strategies
 }
-
 func (r dagStrategyResolver) cudaDeviceOrdinal() (int, bool) {
 	if r.runtime == nil {
 		return 0, false
 	}
 	return r.runtime.CUDADeviceOrdinal()
 }
-
 func (r dagStrategyResolver) openclContext() (OpenCLContext, bool) {
 	if r.runtime == nil {
 		return OpenCLContext{}, false
 	}
 	return r.runtime.OpenCLContext()
+}
+func (r dagStrategyResolver) metalContext() (MetalContext, bool) {
+	if r.runtime == nil {
+		return MetalContext{}, false
+	}
+	return r.runtime.MetalContext()
 }

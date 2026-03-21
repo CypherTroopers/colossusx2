@@ -66,6 +66,9 @@ func (CPUBackend) Mode() cx.BackendMode  { return cx.BackendCPU }
 func (CPUBackend) Description() string   { return "consensus cpu backend" }
 func (CPUBackend) Prepare(*cx.DAG) error { return nil }
 func (CPUBackend) Hash(header []byte, nonce cx.Nonce, dag *cx.DAG) cx.HashResult {
+	if dag.Spec().AlgorithmVersion >= 2 {
+		return cx.StrictV2Hash(dag.Spec(), header, nonce, dag)
+	}
 	return cx.LatticeHash(dag.Spec(), header, nonce, dag, nil)
 }
 
@@ -126,6 +129,9 @@ func (v *Validator) MiningAllocatorName() string {
 }
 
 func (v *Validator) ValidateHeader(store chain.Store, header types.BlockHeader) error {
+	if header.AlgorithmVersion != v.config.Spec.AlgorithmVersion {
+		return fmt.Errorf("%w: algorithm version mismatch", ErrInvalidEpoch)
+	}
 	if header.DAGSizeBytes != v.config.Spec.DAGSizeBytes {
 		return fmt.Errorf("%w: dag size mismatch", ErrInvalidEpoch)
 	}

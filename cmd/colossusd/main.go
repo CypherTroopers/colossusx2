@@ -108,8 +108,8 @@ func parseFlags() (config, error) {
 	bootnodes := fs.String("bootnodes", "", "comma-separated bootnode addresses")
 	nodeID := fs.String("node-id", "", "stable node identifier")
 	targetHex := fs.String("target", "0fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", "mining target in hex")
-	minerBackend := fs.String("miner-backend", string(miner.BackendUnified), "mining backend: unified, cpu, or gpu")
-	minerDAGAlloc := fs.String("miner-dag-alloc", "auto", "mining DAG allocation strategy: auto, go-heap, pinned-host, cuda-managed, opencl-svm")
+	minerBackend := fs.String("miner-backend", string(miner.BackendOpenCL), "mining backend: cuda, opencl, metal, cpu, unified, or gpu")
+	minerDAGAlloc := fs.String("miner-dag-alloc", "auto", "mining DAG allocation strategy: auto, go-heap, pinned-host, cuda-managed, opencl-svm, metal-shared")
 	rpcListen := fs.String("rpc-listen", "", "reserved for future RPC listener")
 	_ = rpcListen
 	if err := fs.Parse(os.Args[1:]); err != nil {
@@ -129,11 +129,14 @@ func parseFlags() (config, error) {
 	if err := spec.Validate(); err != nil {
 		return config{}, err
 	}
-	target, err := cx.ParseTargetHex(*targetHex)
+	backendMode, err := miner.ParseBackendMode(*minerBackend)
 	if err != nil {
 		return config{}, err
 	}
-	backendMode, err := miner.ParseBackendMode(*minerBackend)
+	if err := miner.ValidateStrictProductionConfig(mode, backendMode, *minerDAGAlloc); err != nil {
+		return config{}, err
+	}
+	target, err := cx.ParseTargetHex(*targetHex)
 	if err != nil {
 		return config{}, err
 	}
@@ -165,7 +168,7 @@ func initializeMining(cfg config) (cx.HashBackend, miner.MemoryStrategy, string,
 	if runtimeState != nil {
 		status = "ok"
 	}
-	strategy, err := miner.ResolveDAGStrategy(cfg.MinerBackend, runtimeState, cfg.MinerDAGAlloc)
+	strategy, err := miner.ResolveDAGStrategyForMode(cfg.Chain.Spec.Mode, cfg.MinerBackend, runtimeState, cfg.MinerDAGAlloc)
 	if err != nil {
 		return nil, nil, status, err
 	}

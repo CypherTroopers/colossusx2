@@ -20,19 +20,24 @@ const (
 
 type BackendMode = cx.BackendMode
 
+type (
+	Spec        = cx.Spec
+	Target      = cx.Target
+	HashResult  = cx.HashResult
+	DAG         = cx.DAG
+	Miner       = cx.Miner
+	MineResult  = cx.MineResult
+	HashBackend = cx.HashBackend
+)
+
 const (
 	BackendUnified = cx.BackendUnified
 	BackendCPU     = cx.BackendCPU
+	BackendCUDA    = cx.BackendCUDA
+	BackendOpenCL  = cx.BackendOpenCL
+	BackendMetal   = cx.BackendMetal
 	BackendGPU     = cx.BackendGPU
 )
-
-type Spec = cx.Spec
-type Target = cx.Target
-type HashResult = cx.HashResult
-type DAG = cx.DAG
-type Miner = cx.Miner
-type MineResult = cx.MineResult
-type HashBackend = cx.HashBackend
 
 type runtimeBackend interface {
 	HashBackend
@@ -76,21 +81,19 @@ func ParseCLIConfig(args []string) (CLIConfig, error) {
 	fs := flag.NewFlagSet("colossusx", flag.ContinueOnError)
 	fs.SetOutput(os.Stdout)
 
-	var (
-		modeName     = fs.String("mode", string(cx.ModeStrict), "operating mode: strict or research")
-		backendName  = fs.String("backend", string(BackendUnified), "mining backend: unified, cpu, or gpu")
-		dagAlloc     = fs.String("dag-alloc", "auto", "dag allocation strategy: auto, go-heap, pinned-host, cuda-managed, opencl-svm")
-		dagMiB       = fs.Uint64("dag-mib", DefaultDAGMiB, "DAG size in MiB")
-		reads        = fs.Uint64("reads", DefaultReadsPerH, "random DAG reads per hash")
-		workers      = fs.Int("workers", runtime.NumCPU(), "mining worker count")
-		epochBlocks  = fs.Uint64("epoch-blocks", DefaultEpochBlocks, "blocks per epoch")
-		headerHex    = fs.String("header", "434f4c4f535355532d582d544553542d4845414445522d303031", "header bytes in hex")
-		epochSeedHex = fs.String("epoch-seed", "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff", "epoch seed in hex")
-		targetHex    = fs.String("target", "00ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", "32-byte big-endian target hex")
-		startNonce   = fs.Uint64("start-nonce", 0, "starting nonce")
-		maxNonces    = fs.Uint64("max-nonces", 200000, "0 = unbounded")
-		benchOnly    = fs.Bool("bench", false, "benchmark hash loop only")
-	)
+	modeName := fs.String("mode", string(cx.ModeStrict), "operating mode: strict or research")
+	backendName := fs.String("backend", string(BackendOpenCL), "mining backend: cuda, opencl, metal, cpu, unified, or gpu")
+	dagAlloc := fs.String("dag-alloc", "auto", "dag allocation strategy: auto, go-heap, pinned-host, cuda-managed, opencl-svm, metal-shared")
+	dagMiB := fs.Uint64("dag-mib", DefaultDAGMiB, "DAG size in MiB")
+	reads := fs.Uint64("reads", DefaultReadsPerH, "random DAG reads per hash")
+	workers := fs.Int("workers", runtime.NumCPU(), "mining worker count")
+	epochBlocks := fs.Uint64("epoch-blocks", DefaultEpochBlocks, "blocks per epoch")
+	headerHex := fs.String("header", "434f4c4f535355532d582d544553542d4845414445522d303031", "header bytes in hex")
+	epochSeedHex := fs.String("epoch-seed", "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff", "epoch seed in hex")
+	targetHex := fs.String("target", "00ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", "32-byte big-endian target hex")
+	startNonce := fs.Uint64("start-nonce", 0, "starting nonce")
+	maxNonces := fs.Uint64("max-nonces", 200000, "0 = unbounded")
+	benchOnly := fs.Bool("bench", false, "benchmark hash loop only")
 	if err := fs.Parse(args); err != nil {
 		return CLIConfig{}, err
 	}
@@ -111,6 +114,9 @@ func ParseCLIConfig(args []string) (CLIConfig, error) {
 		}
 	}
 	if err := spec.Validate(); err != nil {
+		return CLIConfig{}, err
+	}
+	if err := ValidateStrictProductionConfig(mode, backend, *dagAlloc); err != nil {
 		return CLIConfig{}, err
 	}
 
@@ -135,7 +141,7 @@ func Run(cfg CLIConfig, backend HashBackend) error {
 	if err != nil {
 		return err
 	}
-	strategy, err := ResolveDAGStrategy(cfg.Backend, rb, cfg.DAGAlloc)
+	strategy, err := ResolveDAGStrategyForMode(cfg.Mode, cfg.Backend, rb, cfg.DAGAlloc)
 	if err != nil {
 		return err
 	}
@@ -145,21 +151,13 @@ func Run(cfg CLIConfig, backend HashBackend) error {
 	if err != nil {
 		return err
 	}
-	defer func() {
-		if err := dag.Close(); err != nil {
-			log.Printf("warning: dag close failed: %v", err)
-		}
-	}()
-
+	defer dag.Close()
 	if err := cx.PopulateDAG(dag, cfg.EpochSeed, cfg.Workers); err != nil {
 		return fmt.Errorf("generate dag: %w", err)
 	}
-	fmt.Println("dag generated")
-
 	if err := backend.Prepare(dag); err != nil {
 		return err
 	}
-
 	miner, err := cx.NewMiner(cfg.Spec, dag, cfg.Workers, skipPrepareBackend{backend})
 	if err != nil {
 		return err
@@ -168,24 +166,13 @@ func Run(cfg CLIConfig, backend HashBackend) error {
 		res := cx.Benchmark(miner, cfg.Header, cx.NewUint64Nonce(cfg.StartNonce), cfg.MaxNonces)
 		fmt.Println("benchmark complete")
 		fmt.Printf("backend: %s\n", res.Backend)
-		fmt.Printf("hashes: %d\n", res.Hashes)
-		fmt.Printf("elapsed: %s\n", res.Elapsed)
-		fmt.Printf("hashrate: %.2f H/s\n", res.HashRate)
 		return nil
 	}
-
 	res, ok := miner.Mine(cfg.Header, cfg.Target, cx.NewUint64Nonce(cfg.StartNonce), cfg.MaxNonces)
 	if !ok {
-		fmt.Println("no solution found in range")
 		return exitCodeError(1)
 	}
-	fmt.Println("solution found")
-	fmt.Printf("nonce: %s\n", res.Nonce.String())
-	fmt.Printf("hash256: %s\n", res.Hash256Hex)
-	fmt.Printf("hash512: %s\n", res.Hash512Hex)
-	fmt.Printf("elapsed: %s\n", res.Elapsed)
-	fmt.Printf("hashes: %d\n", res.Hashes)
-	fmt.Printf("hashrate: %.2f H/s\n", res.HashRate)
+	fmt.Printf("solution found\nnonce: %s\nhash256: %s\nhash512: %s\n", res.Nonce.String(), res.Hash256Hex, res.Hash512Hex)
 	return nil
 }
 
@@ -205,16 +192,7 @@ func InitializeBackendRuntime(backend HashBackend) (runtimeState, error) {
 
 func PrintConfig(cfg CLIConfig, backend HashBackend, strategy MemoryStrategy) {
 	fmt.Println("COLOSSUS-X miner")
-	fmt.Printf("mode: %s\n", cfg.Mode)
-	fmt.Printf("backend: %s (%s)\n", backend.Mode(), backend.Description())
-	fmt.Printf("dag: %d MiB\n", cfg.Spec.DAGSizeBytes/(1024*1024))
-	fmt.Printf("node size: %d bytes\n", cfg.Spec.NodeSize)
-	fmt.Printf("node count: %d\n", cfg.Spec.NodeCount())
-	fmt.Printf("reads/hash: %d\n", cfg.Spec.ReadsPerHash)
-	fmt.Printf("epoch blocks: %d\n", cfg.Spec.EpochBlocks)
-	fmt.Printf("workers: %d\n", cfg.Workers)
-	fmt.Printf("target: %s\n", cfg.Target.String())
-	fmt.Printf("dag allocation: %s\n", strategy.Name())
+	fmt.Printf("mode: %s\nbackend: %s (%s)\nalgorithm_version: %d\ndag allocation: %s\n", cfg.Mode, backend.Mode(), backend.Description(), cfg.Spec.AlgorithmVersion, strategy.Name())
 }
 
 func parseMode(s string) (cx.Mode, error) {
@@ -222,16 +200,16 @@ func parseMode(s string) (cx.Mode, error) {
 	case cx.ModeStrict, cx.ModeResearch:
 		return cx.Mode(s), nil
 	default:
-		return "", fmt.Errorf("unsupported mode %q (expected one of: %s, %s)", s, cx.ModeStrict, cx.ModeResearch)
+		return "", fmt.Errorf("unsupported mode %q", s)
 	}
 }
 
 func ParseBackendMode(s string) (BackendMode, error) {
 	switch BackendMode(s) {
-	case BackendUnified, BackendCPU, BackendGPU:
+	case BackendCPU, BackendCUDA, BackendOpenCL, BackendMetal, BackendUnified, BackendGPU:
 		return BackendMode(s), nil
 	default:
-		return "", fmt.Errorf("unsupported backend %q (expected one of: %s, %s, %s)", s, BackendUnified, BackendCPU, BackendGPU)
+		return "", fmt.Errorf("unsupported backend %q", s)
 	}
 }
 
@@ -241,8 +219,12 @@ func NewBackend(mode BackendMode) (HashBackend, error) {
 		return &UnifiedBackend{}, nil
 	case BackendCPU:
 		return &CPUBackend{}, nil
-	case BackendGPU:
+	case BackendCUDA:
+		return NewCUDABackend()
+	case BackendOpenCL, BackendGPU:
 		return NewGPUBackend()
+	case BackendMetal:
+		return NewMetalBackend()
 	default:
 		return nil, fmt.Errorf("unsupported backend %q", mode)
 	}

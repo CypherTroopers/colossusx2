@@ -12,8 +12,11 @@ import (
 type BackendMode string
 
 const (
-	BackendUnified BackendMode = "unified"
 	BackendCPU     BackendMode = "cpu"
+	BackendCUDA    BackendMode = "cuda"
+	BackendOpenCL  BackendMode = "opencl"
+	BackendMetal   BackendMode = "metal"
+	BackendUnified BackendMode = "unified"
 	BackendGPU     BackendMode = "gpu"
 )
 
@@ -57,25 +60,20 @@ func NewMiner(spec Spec, dag *DAG, workers int, backend HashBackend) (*Miner, er
 	}
 	return &Miner{spec: spec, dag: dag, workers: workers, backend: backend}, nil
 }
-
 func (m *Miner) Mine(header []byte, target Target, startNonce Nonce, maxNonces uint64) (MineResult, bool) {
 	if batchBackend, ok := m.backend.(BatchHashBackend); ok {
 		return m.mineBatch(header, target, startNonce, maxNonces, batchBackend)
 	}
 	start := time.Now()
-
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-
 	var totalHashes atomic.Uint64
 	var found atomic.Bool
-
 	type foundMsg struct {
 		nonce Nonce
 		hash  HashResult
 	}
 	resultCh := make(chan foundMsg, 1)
-
 	var wg sync.WaitGroup
 	for wid := 0; wid < m.workers; wid++ {
 		wg.Add(1)
@@ -91,13 +89,9 @@ func (m *Miner) Mine(header []byte, target Target, startNonce Nonce, maxNonces u
 					return
 				}
 				if maxNonces > 0 {
-					// Current bounded-range mining remains uint64-backed. The Nonce
-					// abstraction lets hashing/backends move beyond uint64 later without
-					// rewriting the core loop shape.
 					if start64, ok := startNonce.(Uint64Nonce); ok {
 						if nonce64, ok := nonce.(Uint64Nonce); ok {
-							offset := uint64(nonce64) - uint64(start64)
-							if offset >= maxNonces {
+							if uint64(nonce64)-uint64(start64) >= maxNonces {
 								return
 							}
 						}
@@ -120,34 +114,15 @@ func (m *Miner) Mine(header []byte, target Target, startNonce Nonce, maxNonces u
 			}
 		}(wid)
 	}
-
-	go func() {
-		wg.Wait()
-		close(resultCh)
-	}()
-
+	go func() { wg.Wait(); close(resultCh) }()
 	msg, ok := <-resultCh
 	if !ok {
 		return MineResult{}, false
 	}
-
 	elapsed := time.Since(start)
 	hashes := totalHashes.Load()
-	var hashrate float64
-	if elapsed > 0 {
-		hashrate = float64(hashes) / elapsed.Seconds()
-	}
-	return MineResult{
-		Nonce:      msg.nonce,
-		Hashes:     hashes,
-		Elapsed:    elapsed,
-		HashRate:   hashrate,
-		Hash256Hex: hex.EncodeToString(msg.hash.Pow256[:]),
-		Hash512Hex: hex.EncodeToString(msg.hash.Full512[:]),
-		Backend:    m.backend.Mode(),
-	}, true
+	return MineResult{Nonce: msg.nonce, Hashes: hashes, Elapsed: elapsed, HashRate: float64(hashes) / elapsed.Seconds(), Hash256Hex: hex.EncodeToString(msg.hash.Pow256[:]), Hash512Hex: hex.EncodeToString(msg.hash.Full512[:]), Backend: m.backend.Mode()}, true
 }
-
 func (m *Miner) mineBatch(header []byte, target Target, startNonce Nonce, maxNonces uint64, batchBackend BatchHashBackend) (MineResult, bool) {
 	start := time.Now()
 	if maxNonces == 0 {
@@ -162,20 +137,11 @@ func (m *Miner) mineBatch(header []byte, target Target, startNonce Nonce, maxNon
 			elapsed := time.Since(start)
 			hashes := uint64(i + 1)
 			nonce, _ := startNonce.AddUint64(uint64(i))
-			return MineResult{
-				Nonce:      nonce,
-				Hashes:     hashes,
-				Elapsed:    elapsed,
-				HashRate:   float64(hashes) / elapsed.Seconds(),
-				Hash256Hex: hex.EncodeToString(h.Pow256[:]),
-				Hash512Hex: hex.EncodeToString(h.Full512[:]),
-				Backend:    m.backend.Mode(),
-			}, true
+			return MineResult{Nonce: nonce, Hashes: hashes, Elapsed: elapsed, HashRate: float64(hashes) / elapsed.Seconds(), Hash256Hex: hex.EncodeToString(h.Pow256[:]), Hash512Hex: hex.EncodeToString(h.Full512[:]), Backend: m.backend.Mode()}, true
 		}
 	}
 	return MineResult{}, false
 }
-
 func Benchmark(m *Miner, header []byte, startNonce Nonce, maxNonces uint64) MineResult {
 	if maxNonces == 0 {
 		maxNonces = 100000
@@ -193,10 +159,5 @@ func Benchmark(m *Miner, header []byte, startNonce Nonce, maxNonces uint64) Mine
 		}
 	}
 	elapsed := time.Since(start)
-	return MineResult{
-		Hashes:   maxNonces,
-		Elapsed:  elapsed,
-		HashRate: float64(maxNonces) / elapsed.Seconds(),
-		Backend:  m.backend.Mode(),
-	}
+	return MineResult{Hashes: maxNonces, Elapsed: elapsed, HashRate: float64(maxNonces) / elapsed.Seconds(), Backend: m.backend.Mode()}
 }
