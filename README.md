@@ -491,7 +491,43 @@ go test ./cmd/colossusd -run TestInitializeMiningUnifiedGoHeap -count=1
 go test ./... -count=1 -race
 go build ./cmd/colossusx ./cmd/colossusd ./cmd/colossusxctl
 ```
+LOG
+```bash
+mkdir -p /tmp/colossusx-test
+RUNLOG=/tmp/colossusx-test/run-1024.log
 
+(
+  while true; do
+    PID=$(pgrep -af 'colossusd.*node1' | awk 'NR==1{print $1}')
+    if [ -n "$PID" ] && [ -r "/proc/$PID/status" ]; then
+      echo "[MEM $(date '+%H:%M:%S')] RSS=$(awk '/VmRSS/ {print $2" kB"}' /proc/$PID/status) SWAP=$(awk '/VmSwap/ {print $2" kB"}' /proc/$PID/status) AVAIL=$(awk '/MemAvailable/ {print $2" kB"}' /proc/meminfo)"
+    else
+      echo "[MEM $(date '+%H:%M:%S')] waiting for colossusd..."
+    fi
+    sleep 5
+  done
+) &
+MONPID=$!
+
+./bin/colossusd \
+  --datadir ./data/node1 \
+  --listen :30333 \
+  --node-id node1 \
+  --network devnet \
+  --mode research \
+  --dag-mib 1024 \
+  --reads 32 \
+  --epoch-blocks 32 \
+  --miner-backend cpu \
+  --miner-dag-alloc auto \
+  --mine \
+  --workers "$(nproc)" \
+  --max-nonces 500000 \
+  --block-time 1s 2>&1 | tee "$RUNLOG"
+
+kill "$MONPID" 2>/dev/null
+wait "$MONPID" 2>/dev/null
+```
 ## Build requirements
 
 - Go `1.23.0`
