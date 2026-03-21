@@ -1,6 +1,7 @@
 package consensus
 
 import (
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -19,6 +20,44 @@ func testConfig(t *testing.T) (types.ChainConfig, types.GenesisConfig) {
 	chainCfg := types.ChainConfig{NetworkID: "test", Spec: spec}
 	genesis := types.GenesisConfig{ChainID: "test", Message: "test", Timestamp: time.Now().Unix() - 1, Bits: target, Spec: spec}
 	return chainCfg, genesis
+}
+
+type namedAlloc struct {
+	name      string
+	freeCount *int32
+	buf       []byte
+}
+
+func (a *namedAlloc) Bytes() []byte { return a.buf }
+func (a *namedAlloc) Name() string  { return a.name }
+func (a *namedAlloc) Free() error {
+	if a.freeCount != nil {
+		atomic.AddInt32(a.freeCount, 1)
+	}
+	a.buf = nil
+	return nil
+}
+
+type namedAllocator struct {
+	name      string
+	freeCount *int32
+}
+
+func (a namedAllocator) Alloc(size uint64) (cx.Allocation, error) {
+	return &namedAlloc{name: a.name, freeCount: a.freeCount, buf: make([]byte, size)}, nil
+}
+func (a namedAllocator) Name() string { return a.name }
+
+func testBlockHeader(chainCfg types.ChainConfig, genesis types.Block) types.BlockHeader {
+	return types.BlockHeader{
+		Version:      1,
+		Height:       1,
+		ParentHash:   genesis.BlockHash(),
+		Timestamp:    genesis.Header.Timestamp + 1,
+		Target:       genesis.Header.Target,
+		EpochSeed:    types.EpochSeedForHeight(chainCfg.Spec, 1),
+		DAGSizeBytes: chainCfg.Spec.DAGSizeBytes,
+	}
 }
 
 func TestValidatorInsertBlock(t *testing.T) {
@@ -40,7 +79,7 @@ func TestValidatorInsertBlock(t *testing.T) {
 	if !becameTip || work.Sign() <= 0 {
 		t.Fatalf("expected genesis to become tip")
 	}
-	next := types.Block{Header: types.BlockHeader{Version: 1, Height: 1, ParentHash: genesis.BlockHash(), Timestamp: genesis.Header.Timestamp + 1, Target: genesisCfg.Bits, EpochSeed: types.EpochSeedForHeight(chainCfg.Spec, 1), DAGSizeBytes: chainCfg.Spec.DAGSizeBytes}}
+	next := types.Block{Header: testBlockHeader(chainCfg, genesis)}
 	sealed, _, err := v.SealBlock(next, 10)
 	if err != nil {
 		t.Fatal(err)
@@ -49,5 +88,167 @@ func TestValidatorInsertBlock(t *testing.T) {
 		t.Fatal(err)
 	} else if !becameTip {
 		t.Fatalf("expected child to become tip")
+	}
+}
+
+func TestValidationAndMiningReuseSharedDAGForHostVisibleAllocator(t *testing.T) {
+	chainCfg, genesisCfg := testConfig(t)
+	v, err := NewValidator(chainCfg, CPUBackend{}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer v.Close()
+
+	genesis := types.NewGenesisBlock(genesisCfg)
+	header := testBlockHeader(chainCfg, genesis)
+
+	miningDAG, err := v.sharedMiningDAGForHeader(header)
+	if err != nil {
+		t.Fatal(err)
+	}
+	validationDAG, err := v.validationDAGForHeader(header)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if miningDAG != validationDAG {
+		t.Fatalf("expected validation to reuse mining DAG")
+	}
+	if !v.DAGReuseEnabled() {
+		t.Fatalf("expected DAG reuse to be enabled for default host-visible allocator")
+	}
+	if got := v.SharedCacheSize(); got != 1 {
+		t.Fatalf("expected 1 shared DAG, got %d", got)
+	}
+	if got := v.ValidationCacheSize(); got != 0 {
+		t.Fatalf("expected 0 fallback validation DAGs, got %d", got)
+	}
+}
+
+func TestValidationFallsBackWhenMiningAllocatorIsNotKnownReusable(t *testing.T) {
+	chainCfg, genesisCfg := testConfig(t)
+	v, err := NewValidator(chainCfg, CPUBackend{}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer v.Close()
+
+	v.SetMiningBackend(CPUBackend{}, namedAllocator{name: "cuda-managed"})
+	genesis := types.NewGenesisBlock(genesisCfg)
+	header := testBlockHeader(chainCfg, genesis)
+
+	miningDAG, err := v.sharedMiningDAGForHeader(header)
+	if err != nil {
+		t.Fatal(err)
+	}
+	validationDAG, err := v.validationDAGForHeader(header)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if miningDAG == validationDAG {
+		t.Fatalf("expected validation fallback DAG when mining allocator is not safely reusable")
+	}
+	if v.DAGReuseEnabled() {
+		t.Fatalf("expected DAG reuse to be disabled for cuda-managed allocator")
+	}
+	if got := v.SharedCacheSize(); got != 1 {
+		t.Fatalf("expected 1 shared DAG, got %d", got)
+	}
+	if got := v.ValidationCacheSize(); got != 1 {
+		t.Fatalf("expected 1 fallback validation DAG, got %d", got)
+	}
+}
+
+func TestSealBlockAndValidateBlockShareCommonCaseDAG(t *testing.T) {
+	chainCfg, genesisCfg := testConfig(t)
+	v, err := NewValidator(chainCfg, CPUBackend{}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer v.Close()
+	store := chain.NewMemoryStore()
+
+	genesis, _, err := v.SealBlock(types.NewGenesisBlock(genesisCfg), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := v.InsertBlock(store, genesis); err != nil {
+		t.Fatal(err)
+	}
+
+	next := types.Block{Header: testBlockHeader(chainCfg, genesis)}
+	sealed, _, err := v.SealBlock(next, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := v.ValidateBlock(store, sealed); err != nil {
+		t.Fatal(err)
+	}
+	if got := v.SharedCacheSize(); got != 1 {
+		t.Fatalf("expected 1 shared DAG for the common-case shared epoch, got %d", got)
+	}
+	if got := v.ValidationCacheSize(); got != 0 {
+		t.Fatalf("expected no fallback validation DAGs, got %d", got)
+	}
+}
+
+func TestSharedCacheKeyIgnoresAllocatorName(t *testing.T) {
+	chainCfg, genesisCfg := testConfig(t)
+	v, err := NewValidator(chainCfg, CPUBackend{}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer v.Close()
+
+	genesis := types.NewGenesisBlock(genesisCfg)
+	header := testBlockHeader(chainCfg, genesis)
+
+	v.SetMiningBackend(CPUBackend{}, namedAllocator{name: "go-heap"})
+	dagA, err := v.sharedMiningDAGForHeader(header)
+	if err != nil {
+		t.Fatal(err)
+	}
+	v.SetMiningBackend(CPUBackend{}, namedAllocator{name: "pinned-host"})
+	dagB, err := v.sharedMiningDAGForHeader(header)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dagA == dagB {
+		t.Fatalf("expected cache flush on allocator change to rebuild canonical DAG")
+	}
+	if got := v.SharedCacheSize(); got != 1 {
+		t.Fatalf("expected a single logical shared DAG entry after rebuild, got %d", got)
+	}
+	validationDAG, err := v.validationDAGForHeader(header)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dagB != validationDAG {
+		t.Fatalf("expected validation to reuse canonical shared DAG regardless of allocator name partitioning")
+	}
+}
+
+func TestCloseDoesNotDoubleFreeSharedPointers(t *testing.T) {
+	chainCfg, genesisCfg := testConfig(t)
+	v, err := NewValidator(chainCfg, CPUBackend{}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var frees int32
+	v.allocator = namedAllocator{name: "go-heap", freeCount: &frees}
+	v.miningAllocator = namedAllocator{name: "go-heap", freeCount: &frees}
+
+	genesis := types.NewGenesisBlock(genesisCfg)
+	header := testBlockHeader(chainCfg, genesis)
+	shared, err := v.sharedMiningDAGForHeader(header)
+	if err != nil {
+		t.Fatal(err)
+	}
+	v.fallbackValidationDAGs[v.fallbackValidationDAGCacheKey(header, v.validationAllocator())] = shared
+
+	if err := v.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if got := atomic.LoadInt32(&frees); got != 1 {
+		t.Fatalf("expected shared DAG allocation to be freed once, got %d", got)
 	}
 }
