@@ -17,19 +17,25 @@ func TestParseBackendMode(t *testing.T) {
 	}
 }
 
-func TestParseCLIConfigStrictModeRejectsOverrides(t *testing.T) {
-	_, err := ParseCLIConfig([]string{"-mode", "strict", "-dag-mib", "1"})
-	if err == nil {
-		t.Fatal("expected strict mode override to fail")
+func TestParseCLIConfigStrictModeAllowsDynamicDAGProfile(t *testing.T) {
+	cfg, err := ParseCLIConfig([]string{"-mode", "strict"})
+	if err != nil {
+		t.Fatalf("ParseCLIConfig: %v", err)
+	}
+	if cfg.Spec.InitialDAGSizeBytes != 8*1024*1024*1024 {
+		t.Fatalf("unexpected strict initial DAG size: %d", cfg.Spec.InitialDAGSizeBytes)
+	}
+	if cfg.Spec.DAGGrowthBytesPerEpoch != 512*1024*1024 {
+		t.Fatalf("unexpected strict DAG growth: %d", cfg.Spec.DAGGrowthBytesPerEpoch)
 	}
 }
 
 func TestParseCLIConfigResearchModeAllowsOverrides(t *testing.T) {
-	cfg, err := ParseCLIConfig([]string{"-mode", "research", "-dag-mib", "1", "-reads", "8", "-epoch-blocks", "16"})
+	cfg, err := ParseCLIConfig([]string{"-mode", "research", "-initial-dag-mib", "1", "-dag-growth-mib-per-epoch", "2", "-reads", "8", "-epoch-blocks", "16"})
 	if err != nil {
 		t.Fatalf("ParseCLIConfig: %v", err)
 	}
-	if cfg.Spec.Mode != cx.ModeResearch || cfg.Spec.DAGSizeBytes != 1024*1024 || cfg.Spec.ReadsPerHash != 8 || cfg.Spec.EpochBlocks != 16 {
+	if cfg.Spec.Mode != cx.ModeResearch || cfg.Spec.InitialDAGSizeBytes != 1024*1024 || cfg.Spec.DAGGrowthBytesPerEpoch != 2*1024*1024 || cfg.Spec.ReadsPerHash != 8 || cfg.Spec.EpochBlocks != 16 {
 		t.Fatalf("unexpected research spec: %+v", cfg.Spec)
 	}
 }
@@ -144,5 +150,15 @@ func TestStrictDAGRequiresFullLogicalImage(t *testing.T) {
 	_, err := NewDAGWithAllocation(spec, alloc, false)
 	if err == nil {
 		t.Fatal("expected strict DAG allocation to require the full logical DAG image")
+	}
+}
+
+func TestParseCLIConfigResearchModeDagMibAliasSetsInitialDag(t *testing.T) {
+	cfg, err := ParseCLIConfig([]string{"-mode", "research", "-dag-mib", "3"})
+	if err != nil {
+		t.Fatalf("ParseCLIConfig: %v", err)
+	}
+	if cfg.Spec.InitialDAGSizeBytes != 3*1024*1024 {
+		t.Fatalf("expected dag-mib alias to set initial DAG size, got %d", cfg.Spec.InitialDAGSizeBytes)
 	}
 }

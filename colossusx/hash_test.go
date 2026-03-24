@@ -100,14 +100,19 @@ func TestLessOrEqualBETargetComparison(t *testing.T) {
 	}
 }
 
-func TestStrictModeConstantEnforcement(t *testing.T) {
+func TestStrictModeDynamicDAGProfile(t *testing.T) {
 	strict := StrictSpec()
 	if err := strict.Validate(); err != nil {
 		t.Fatalf("StrictSpec should validate: %v", err)
 	}
-	strict.DAGSizeBytes = 1024
-	if err := strict.Validate(); err == nil {
-		t.Fatal("expected strict spec override to fail validation")
+	if strict.InitialDAGSizeBytes != 8*1024*1024*1024 {
+		t.Fatalf("expected strict initial DAG size 8GiB, got %d", strict.InitialDAGSizeBytes)
+	}
+	if strict.DAGGrowthBytesPerEpoch != 512*1024*1024 {
+		t.Fatalf("expected strict DAG growth 512MiB, got %d", strict.DAGGrowthBytesPerEpoch)
+	}
+	if strict.DAGSizeForHeight(strict.EpochBlocks) <= strict.DAGSizeForHeight(0) {
+		t.Fatal("expected strict DAG size to grow after an epoch")
 	}
 }
 

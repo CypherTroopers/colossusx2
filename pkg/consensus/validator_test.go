@@ -12,7 +12,7 @@ import (
 
 func testConfig(t *testing.T) (types.ChainConfig, types.GenesisConfig) {
 	t.Helper()
-	spec := cx.ResearchSpec(1024*1024, 8, 8)
+	spec := cx.ResearchSpecWithGrowth(1024*1024, 256*1024, 8, 8)
 	target, err := cx.ParseTargetHex("ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff")
 	if err != nil {
 		t.Fatal(err)
@@ -64,7 +64,7 @@ func testBlockHeader(chainCfg types.ChainConfig, genesis types.Block) types.Bloc
 		Timestamp:        genesis.Header.Timestamp + 1,
 		Target:           genesis.Header.Target,
 		EpochSeed:        types.EpochSeedForHeight(chainCfg.Spec, 1),
-		DAGSizeBytes:     chainCfg.Spec.DAGSizeBytes,
+		DAGSizeBytes:     chainCfg.Spec.DAGSizeForHeight(1),
 	}
 }
 
@@ -326,5 +326,49 @@ func TestCloseDoesNotDoubleFreeSharedPointers(t *testing.T) {
 	}
 	if got := atomic.LoadInt32(&frees); got != 1 {
 		t.Fatalf("expected shared DAG allocation to be freed once, got %d", got)
+	}
+}
+
+func TestValidateHeaderRejectsIncorrectResolvedDAGSize(t *testing.T) {
+	chainCfg, genesisCfg := testConfig(t)
+	v, err := NewValidator(chainCfg, CPUBackend{}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer v.Close()
+	store := chain.NewMemoryStore()
+	genesis, _, err := v.SealBlock(types.NewGenesisBlock(genesisCfg), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := v.InsertBlock(store, genesis); err != nil {
+		t.Fatal(err)
+	}
+	header := testBlockHeader(chainCfg, genesis)
+	header.DAGSizeBytes++
+	if err := v.ValidateHeader(store, header); err == nil {
+		t.Fatal("expected DAG size mismatch")
+	}
+}
+
+func TestValidateHeaderRejectsIncorrectEpochSeed(t *testing.T) {
+	chainCfg, genesisCfg := testConfig(t)
+	v, err := NewValidator(chainCfg, CPUBackend{}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer v.Close()
+	store := chain.NewMemoryStore()
+	genesis, _, err := v.SealBlock(types.NewGenesisBlock(genesisCfg), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := v.InsertBlock(store, genesis); err != nil {
+		t.Fatal(err)
+	}
+	header := testBlockHeader(chainCfg, genesis)
+	header.EpochSeed[0] ^= 0xFF
+	if err := v.ValidateHeader(store, header); err == nil {
+		t.Fatal("expected epoch seed mismatch")
 	}
 }

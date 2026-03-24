@@ -12,10 +12,11 @@ import (
 )
 
 const (
-	DefaultDAGMiB      = cx.StrictDAGSizeBytes / (1024 * 1024)
-	DefaultReadsPerH   = cx.StrictReadsPerHash
-	DefaultNodeSize    = cx.StrictNodeSize
-	DefaultEpochBlocks = cx.StrictEpochBlocks
+	DefaultInitialDAGMiB = cx.StrictInitialDAGSizeBytes / (1024 * 1024)
+	DefaultDAGGrowthMiB  = cx.DefaultDAGGrowthBytesPerEpoch / (1024 * 1024)
+	DefaultReadsPerH     = cx.StrictReadsPerHash
+	DefaultNodeSize      = cx.StrictNodeSize
+	DefaultEpochBlocks   = cx.StrictEpochBlocks
 )
 
 type BackendMode = cx.BackendMode
@@ -84,7 +85,9 @@ func ParseCLIConfig(args []string) (CLIConfig, error) {
 	modeName := fs.String("mode", string(cx.ModeStrict), "operating mode: strict or research")
 	backendName := fs.String("backend", string(BackendOpenCL), "mining backend: cuda, opencl, metal, cpu, unified, or gpu")
 	dagAlloc := fs.String("dag-alloc", "auto", "dag allocation strategy: auto, go-heap, pinned-host, cuda-managed, opencl-svm, metal-shared")
-	dagMiB := fs.Uint64("dag-mib", DefaultDAGMiB, "DAG size in MiB")
+	initialDAGMiB := fs.Uint64("initial-dag-mib", DefaultInitialDAGMiB, "initial DAG size in MiB")
+	dagMiB := fs.Uint64("dag-mib", 0, "deprecated alias for -initial-dag-mib")
+	dagGrowthMiB := fs.Uint64("dag-growth-mib-per-epoch", DefaultDAGGrowthMiB, "DAG growth per epoch in MiB")
 	reads := fs.Uint64("reads", DefaultReadsPerH, "random DAG reads per hash")
 	workers := fs.Int("workers", runtime.NumCPU(), "mining worker count")
 	epochBlocks := fs.Uint64("epoch-blocks", DefaultEpochBlocks, "blocks per epoch")
@@ -106,11 +109,21 @@ func ParseCLIConfig(args []string) (CLIConfig, error) {
 	if err != nil {
 		return CLIConfig{}, err
 	}
-	spec := cx.ResearchSpec((*dagMiB)*1024*1024, *reads, *epochBlocks)
+	if *dagMiB != 0 {
+		*initialDAGMiB = *dagMiB
+	}
+	spec := cx.ResearchSpecWithGrowth((*initialDAGMiB)*1024*1024, (*dagGrowthMiB)*1024*1024, *reads, *epochBlocks)
 	if mode == cx.ModeStrict {
 		spec = cx.StrictSpec()
-		if (*dagMiB)*1024*1024 != cx.StrictDAGSizeBytes || *reads != cx.StrictReadsPerHash || *epochBlocks != cx.StrictEpochBlocks {
-			return CLIConfig{}, fmt.Errorf("strict mode does not allow overriding DAG, reads, or epoch constants")
+		if *reads != cx.StrictReadsPerHash || *epochBlocks != cx.StrictEpochBlocks {
+			return CLIConfig{}, fmt.Errorf("strict mode does not allow overriding reads or epoch constants")
+		}
+		if *dagGrowthMiB != DefaultDAGGrowthMiB {
+			spec.DAGGrowthBytesPerEpoch = (*dagGrowthMiB) * 1024 * 1024
+		}
+		if *initialDAGMiB != DefaultInitialDAGMiB {
+			spec.InitialDAGSizeBytes = (*initialDAGMiB) * 1024 * 1024
+			spec.DAGSizeBytes = spec.InitialDAGSizeBytes
 		}
 	}
 	if err := spec.Validate(); err != nil {

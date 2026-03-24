@@ -132,8 +132,9 @@ func (v *Validator) ValidateHeader(store chain.Store, header types.BlockHeader) 
 	if header.AlgorithmVersion != v.config.Spec.AlgorithmVersion {
 		return fmt.Errorf("%w: algorithm version mismatch", ErrInvalidEpoch)
 	}
-	if header.DAGSizeBytes != v.config.Spec.DAGSizeBytes {
-		return fmt.Errorf("%w: dag size mismatch", ErrInvalidEpoch)
+	expectedDAGSize := v.config.Spec.DAGSizeForHeight(header.Height)
+	if header.DAGSizeBytes != expectedDAGSize {
+		return fmt.Errorf("%w: dag size mismatch expected=%d got=%d", ErrInvalidEpoch, expectedDAGSize, header.DAGSizeBytes)
 	}
 	expectedSeed := types.EpochSeedForHeight(v.config.Spec, header.Height)
 	if expectedSeed != header.EpochSeed {
@@ -380,7 +381,7 @@ func (v *Validator) cachedDAGForHeader(header types.BlockHeader, allocator cx.Al
 	if dag, ok := cache[key]; ok {
 		return dag, nil
 	}
-	spec := v.config.Spec
+	spec := v.config.Spec.ResolvedForHeight(header.Height)
 	spec.DAGSizeBytes = header.DAGSizeBytes
 	dag, err := cx.NewDAGWithAllocator(spec, allocator)
 	if err != nil {

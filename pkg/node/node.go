@@ -146,16 +146,18 @@ func (n *Node) mineNextBlock() (types.Block, cx.MineResult, error) {
 	if err != nil {
 		return types.Block{}, cx.MineResult{}, err
 	}
+	nextHeight := tip.Header.Height + 1
+	resolvedSpec := n.cfg.Chain.Spec.ResolvedForHeight(nextHeight)
 	header := types.BlockHeader{
 		Version:          1,
-		AlgorithmVersion: n.cfg.Chain.Spec.AlgorithmVersion,
-		Height:           tip.Header.Height + 1,
+		AlgorithmVersion: resolvedSpec.AlgorithmVersion,
+		Height:           nextHeight,
 		ParentHash:       tip.BlockHash(),
 		Timestamp:        max(time.Now().Unix(), tip.Header.Timestamp+1),
 		Target:           n.cfg.Genesis.Bits,
-		EpochSeed:        types.EpochSeedForHeight(n.cfg.Chain.Spec, tip.Header.Height+1),
-		DAGSizeBytes:     n.cfg.Chain.Spec.DAGSizeBytes,
-		TxRoot:           sha256.Sum256([]byte(fmt.Sprintf("height:%d", tip.Header.Height+1))),
+		EpochSeed:        types.EpochSeedForHeight(resolvedSpec, nextHeight),
+		DAGSizeBytes:     resolvedSpec.DAGSizeBytes,
+		TxRoot:           sha256.Sum256([]byte(fmt.Sprintf("height:%d", nextHeight))),
 		StateRoot:        sha256.Sum256([]byte(tip.BlockHash().String())),
 	}
 	block := types.Block{Header: header}
