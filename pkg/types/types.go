@@ -22,7 +22,7 @@ type BlockHeader struct {
 	Target           cx.Target `json:"target"`
 	Nonce            uint64    `json:"nonce"`
 	EpochSeed        Hash      `json:"epoch_seed"`
-	DAGSizeBytes     uint64    `json:"dag_size_bytes"`
+	DAGSizeBytes     uint64    `json:"dag_size_bytes"` // resolved DAG size for this block height
 	TxRoot           Hash      `json:"tx_root"`
 	StateRoot        Hash      `json:"state_root"`
 }
@@ -106,11 +106,12 @@ func NewGenesisBlock(cfg GenesisConfig) Block {
 	var stateRoot Hash
 	txRoot = sha256.Sum256([]byte(cfg.Message))
 	stateRoot = sha256.Sum256([]byte(cfg.ExtraData))
-	return Block{Header: BlockHeader{Version: 1, AlgorithmVersion: cfg.Spec.AlgorithmVersion, Height: 0, ParentHash: Hash{}, Timestamp: cfg.Timestamp, Target: cfg.Bits, Nonce: 0, EpochSeed: EpochSeedForHeight(cfg.Spec, 0), DAGSizeBytes: cfg.Spec.DAGSizeBytes, TxRoot: txRoot, StateRoot: stateRoot}}
+	resolved := cfg.Spec.ResolvedForHeight(0)
+	return Block{Header: BlockHeader{Version: 1, AlgorithmVersion: resolved.AlgorithmVersion, Height: 0, ParentHash: Hash{}, Timestamp: cfg.Timestamp, Target: cfg.Bits, Nonce: 0, EpochSeed: EpochSeedForHeight(resolved, 0), DAGSizeBytes: resolved.DAGSizeBytes, TxRoot: txRoot, StateRoot: stateRoot}}
 }
 func EpochSeedForHeight(spec cx.Spec, height uint64) Hash {
 	var seedMaterial [16]byte
 	binary.BigEndian.PutUint64(seedMaterial[:8], height/spec.EpochBlocks)
-	binary.BigEndian.PutUint64(seedMaterial[8:], spec.DAGSizeBytes)
+	binary.BigEndian.PutUint64(seedMaterial[8:], spec.DAGSizeForHeight(height))
 	return sha256.Sum256(seedMaterial[:])
 }

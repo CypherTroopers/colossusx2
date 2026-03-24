@@ -76,3 +76,23 @@ func TestVerifyHeaderStatelessChecksTarget(t *testing.T) {
 		t.Fatal("expected lower target to fail")
 	}
 }
+
+func TestHashHeaderStatelessSupportsDifferentResolvedSizesAcrossEpochs(t *testing.T) {
+	spec := ResearchSpecWithGrowth(64*16, 64, 8, 8)
+	seedEpoch0 := []byte("0123456789abcdef0123456789abcdef")
+	seedEpoch1 := []byte("fedcba9876543210fedcba9876543210")
+	header := []byte("external-verifier-header")
+	nonce := NewUint64Nonce(42)
+
+	resolved0 := spec.ResolvedForHeight(0)
+	resolved1 := spec.ResolvedForHeight(8)
+	if resolved1.DAGSizeBytes <= resolved0.DAGSizeBytes {
+		t.Fatal("expected DAG to grow across epochs")
+	}
+	if _, err := HashHeaderStateless(resolved0, header, nonce, seedEpoch0); err != nil {
+		t.Fatalf("HashHeaderStateless epoch0: %v", err)
+	}
+	if _, err := HashHeaderStateless(resolved1, header, nonce, seedEpoch1); err != nil {
+		t.Fatalf("HashHeaderStateless epoch1: %v", err)
+	}
+}

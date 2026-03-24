@@ -69,7 +69,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	fmt.Printf("colossusd starting network=%s mode=%s dag=%dMiB workers=%d mine=%t datadir=%s listen=%s bootnodes=%d node_id=%s miner_backend=%s miner_dag_alloc=%s resolved_alloc=%s runtime_init=%s execution=%s\n", cfg.Chain.NetworkID, cfg.Chain.Spec.Mode, cfg.Chain.Spec.DAGSizeBytes/(1024*1024), cfg.Workers, cfg.Mine, cfg.DataDir, cfg.ListenAddr, len(cfg.Bootnodes), cfg.NodeID, cfg.MinerBackend, cfg.MinerDAGAlloc, strategy.Name(), runtimeStatus, miningBackend.Description())
+	fmt.Printf("colossusd starting network=%s mode=%s initial_dag=%dMiB dag_growth=%dMiB/epoch workers=%d mine=%t datadir=%s listen=%s bootnodes=%d node_id=%s miner_backend=%s miner_dag_alloc=%s resolved_alloc=%s runtime_init=%s execution=%s\n", cfg.Chain.NetworkID, cfg.Chain.Spec.Mode, cfg.Chain.Spec.InitialDAGSizeBytes/(1024*1024), cfg.Chain.Spec.DAGGrowthBytesPerEpoch/(1024*1024), cfg.Workers, cfg.Mine, cfg.DataDir, cfg.ListenAddr, len(cfg.Bootnodes), cfg.NodeID, cfg.MinerBackend, cfg.MinerDAGAlloc, strategy.Name(), runtimeStatus, miningBackend.Description())
 	if err := n.Run(ctx); err != nil && err != context.Canceled {
 		log.Fatal(err)
 	}
@@ -94,7 +94,9 @@ func parseFlags() (config, error) {
 	fs := flag.NewFlagSet("colossusd", flag.ContinueOnError)
 	modeName := fs.String("mode", string(cx.ModeResearch), "chain mode: strict or research")
 	networkID := fs.String("network", "devnet", "network identifier")
-	dagMiB := fs.Uint64("dag-mib", 8, "DAG size in MiB for research mode")
+	initialDAGMiB := fs.Uint64("initial-dag-mib", cx.StrictInitialDAGSizeBytes/(1024*1024), "initial DAG size in MiB")
+	dagMiB := fs.Uint64("dag-mib", 0, "deprecated alias for -initial-dag-mib")
+	dagGrowthMiB := fs.Uint64("dag-growth-mib-per-epoch", cx.DefaultDAGGrowthBytesPerEpoch/(1024*1024), "DAG growth per epoch in MiB")
 	reads := fs.Uint64("reads", 32, "DAG reads per hash for research mode")
 	epochBlocks := fs.Uint64("epoch-blocks", 32, "blocks per epoch for research mode")
 	mine := fs.Bool("mine", true, "enable local mining loop")
@@ -116,13 +118,29 @@ func parseFlags() (config, error) {
 		return config{}, err
 	}
 
+	setFlags := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { setFlags[f.Name] = true })
+
 	mode := cx.Mode(*modeName)
 	var spec cx.Spec
+	if *dagMiB != 0 {
+		*initialDAGMiB = *dagMiB
+	}
+	if mode == cx.ModeResearch && !setFlags["initial-dag-mib"] && !setFlags["dag-mib"] {
+		*initialDAGMiB = 8
+	}
 	switch mode {
 	case cx.ModeStrict:
 		spec = cx.StrictSpec()
+		if *initialDAGMiB != cx.StrictInitialDAGSizeBytes/(1024*1024) {
+			spec.InitialDAGSizeBytes = (*initialDAGMiB) * 1024 * 1024
+			spec.DAGSizeBytes = spec.InitialDAGSizeBytes
+		}
+		if *dagGrowthMiB != cx.DefaultDAGGrowthBytesPerEpoch/(1024*1024) {
+			spec.DAGGrowthBytesPerEpoch = (*dagGrowthMiB) * 1024 * 1024
+		}
 	case cx.ModeResearch:
-		spec = cx.ResearchSpec((*dagMiB)*1024*1024, *reads, *epochBlocks)
+		spec = cx.ResearchSpecWithGrowth((*initialDAGMiB)*1024*1024, (*dagGrowthMiB)*1024*1024, *reads, *epochBlocks)
 	default:
 		return config{}, fmt.Errorf("unsupported mode %q", *modeName)
 	}

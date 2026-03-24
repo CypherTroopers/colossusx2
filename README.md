@@ -10,7 +10,7 @@ After reviewing the current repository layout, the most important practical take
 
 - `go run .` from the repository root is **not** the correct way to run the project,
 - the actual runnable binaries live under `cmd/colossusx`, `cmd/colossusd`, and `cmd/colossusxctl`, and
-- small local runs should generally use **research mode** because strict mode is locked to an 80 GiB DAG.
+- small local runs should generally use **research mode** because strict mode uses a dynamic DAG profile (8 GiB initial, +512 MiB per epoch).
 
 ## Repository layout
 
@@ -185,7 +185,9 @@ The standalone miner in `cmd/colossusx` exposes these important patterns:
 - `-mode strict|research`
 - `-backend unified|cpu|gpu`
 - `-dag-alloc auto|go-heap|pinned-host|cuda-managed|opencl-svm`
-- `-dag-mib <MiB>`
+- `-initial-dag-mib <MiB>`
+- `-dag-growth-mib-per-epoch <MiB>`
+- `-dag-mib <MiB>` (deprecated alias for `-initial-dag-mib`)
 - `-reads <count>`
 - `-epoch-blocks <count>`
 - `-workers <count>`
@@ -205,27 +207,21 @@ The commands below are updated to match the **actual runnable entrypoint**: `./c
 ```bash
 go run ./cmd/colossusx -h
 ```
-### DAG size reference (`--dag-mib`)
+### DAG growth profile (`--initial-dag-mib`, `--dag-growth-mib-per-epoch`)
 
-`--dag-mib` is specified in MiB, not GiB.
+DAG sizing is dynamic and based on epoch height.
 
-Common values:
-- 4 GiB  = 4096
-- 8 GiB  = 8192
-- 16 GiB = 16384
-- 32 GiB = 32768
-- 80 GiB = 81920
+- `--initial-dag-mib` sets the initial epoch-0 DAG size.
+- `--dag-growth-mib-per-epoch` sets growth applied at each epoch boundary.
+- `--dag-mib` is retained as a deprecated alias for `--initial-dag-mib`.
 
 Examples:
-- `--mode research --dag-mib 4096`  => 4 GiB DAG
-- `--mode research --dag-mib 8192`  => 8 GiB DAG
-- `--mode research --dag-mib 16384` => 16 GiB DAG
-- `--mode research --dag-mib 32768` => 32 GiB DAG
-- `--mode research --dag-mib 81920` => 80 GiB DAG
+- `--mode research --initial-dag-mib 1024 --dag-growth-mib-per-epoch 64`
+- `--mode strict --initial-dag-mib 8192 --dag-growth-mib-per-epoch 512`
 
 Note:
-- In `research` mode, DAG size is configurable via `--dag-mib`.
-- In `strict` mode, DAG size is fixed to the strict protocol constant (80 GiB).
+- In `research` mode, initial size and growth are configurable.
+- In `strict` mode, defaults are 8 GiB initial and +512 MiB per epoch.
 ### Small research benchmark: unified backend
 
 ```bash
@@ -314,7 +310,7 @@ go run ./cmd/colossusx \
 go run ./cmd/colossusx -mode strict -bench -backend unified
 ```
 
-> Warning: strict mode allocates the real 80 GiB DAG and is not appropriate for ordinary laptops/CI containers.
+> Warning: strict mode starts at 8 GiB and grows every epoch; it may still be too large for ordinary laptops/CI containers.
 
 ## Dev node (`colossusd`) command patterns
 
@@ -408,7 +404,7 @@ go run ./cmd/colossusd \
   -miner-dag-alloc auto
 ```
 
-> Warning: this uses the strict 80 GiB DAG profile.
+> Warning: this uses the strict dynamic DAG profile (8 GiB initial, +512 MiB/epoch).
 
 ## What `colossusd` flags control
 
@@ -416,7 +412,9 @@ Useful daemon flags include:
 
 - `-mode`
 - `-network`
-- `-dag-mib`
+- `-initial-dag-mib`
+- `-dag-growth-mib-per-epoch`
+- `-dag-mib` (deprecated alias for initial DAG size)
 - `-reads`
 - `-epoch-blocks`
 - `-mine` / `-no-mine`
